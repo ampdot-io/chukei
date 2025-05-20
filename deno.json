@@ -4,5 +4,8 @@
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@1"
+  },
+  "fmt": {
+    "indentWidth": 4
   }
 }

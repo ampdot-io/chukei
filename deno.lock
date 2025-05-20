@@ -1,0 +1,19 @@
+{
+  "version": "5",
+  "redirects": {
+    "https://esm.sh/@huggingface/hub": "https://esm.sh/@huggingface/hub@2.1.0"
+  },
+  "remote": {
+    "https://esm.sh/@huggingface/hub@2.1.0": "c9a00e8d219ed80c013e448e9e19756b03f2da54e7e656a6c496551db8eb59b2",
+    "https://esm.sh/@huggingface/hub@2.1.0/denonext/dist/FileBlob-GRW5ZULE.mjs": "818c984dd785c1cf37d6fbcbed877c443beb72bb0c4fffc493d2912241123e32",
+    "https://esm.sh/@huggingface/hub@2.1.0/denonext/dist/sha256-node-2YU2V4BH.mjs": "16cacbe0595a3966260d8516c58478f8e8fd00211f6b7b80b843cc4b71609785",
+    "https://esm.sh/@huggingface/hub@2.1.0/denonext/dist/sha256-wrapper-DYTB3MXW.mjs": "30416080d2408b254e3fc9141759fb45bf20ea632befd7c99bcfa01ebbb0e63a",
+    "https://esm.sh/@huggingface/hub@2.1.0/denonext/dist/sub-paths-WNN3FV5L.mjs": "7f6e50a1a3c7da8386fa427c8b7bd7258402b40a69acfee938b7eb3d193b92a1",
+    "https://esm.sh/@huggingface/hub@2.1.0/denonext/hub.mjs": "1dd290d6144535377bf3c12c8f212379ac8aa437c1b7822e365eda6a54874e10"
+  },
+  "workspace": {
+    "dependencies": [
+      "jsr:@std/assert@1"
+    ]
+  }
+}

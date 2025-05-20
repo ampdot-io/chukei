@@ -2,6 +2,10 @@
 
 Low-latency multi-model LLM inference with a focus on fast cold boot times.
 
+## Features
+
+- [ ] Self-modifying with HMR and Claude Code / Codex integration
+
 ## Hardware support
 
 By dynamically migrating models between backends with different cold boot times,
