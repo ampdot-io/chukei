@@ -46,3 +46,17 @@ Do **not** include `/v1` or `/completions` in the `api_base`.
 
 Model-specific configurations are also stored in this directory. This format
 is undocumented and expected to change.
+
+## Setup
+
+```
+deno run -A main.ts
+```
+
+or
+
+```
+deno compile -A --output chukei main.ts
+```
+
+and then copy the resulting binary to the target system
