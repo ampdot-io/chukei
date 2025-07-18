@@ -1,0 +1,23 @@
+meta {
+  name: Success: Mistral OpenRouter
+  type: http
+  seq: 3
+}
+
+post {
+  url: http://localhost:6011/v1/completions
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: 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
+}
+
+body:json {
+  {
+    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+    "prompt": "I think, therefore I",
+    "max_tokens": 3
+  }
+}

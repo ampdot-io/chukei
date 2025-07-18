@@ -1,120 +1,200 @@
-import * as hfHub from "https://esm.sh/@huggingface/hub";
+import {
+    Application,
+    Context,
+    Next,
+    proxy,
+    Router,
+} from "https://deno.land/x/oak/mod.ts";
+import * as z from "npm:zod";
+import os from "node:os";
+import * as toml from "jsr:@std/toml";
+import { walk } from "jsr:@std/fs/walk";
+import { securePath } from "./util.ts";
+import merge from "npm:merge-deep";
+import { exists as fileExists } from "jsr:@std/fs/exists";
+import { json } from "node:stream/consumers";
+import { Buffer } from "node:buffer";
+import { dirname } from "node:path";
 
-const globalConfig = {
-    defaultQuant: "Q6_K",
-};
+const router = new Router();
 
-/* Basic primitives */
-const FailedAttempt = Symbol();
-
-function attempt(fn) {
-    return function () {
-        let res;
-        try {
-            res = fn.apply(null, arguments);
-        } catch (err) {
-            // todo: log it
-            return FailedAttempt;
-        }
-        // todo: log the success
-        return res;
-    };
+function getConfigPath() {
+    return os.homedir() + "/chukei.autoconfig";
 }
 
-// todo: execution order strategies; random, parallel, intelligent (AI)
-async function attemptForEach(iterator, fn) {
-    for await (const member of iterator) {
-        let res;
-        try {
-            return fn(member);
-        } catch (err) {
-            // todo: log it
-            continue;
+async function ensureModelsDir() {
+    await Deno.mkdir(getConfigPath(), { recursive: true });
+}
+
+const specialFiles = new Set(["config.toml"]);
+
+router.get("/v1/models", async (ctx) => {
+    await ensureModelsDir();
+    const modelFiles = [];
+    for await (
+        const dirEntry of walk(getConfigPath(), {
+            exts: ["toml"],
+            canonicalize: false,
+        })
+    ) {
+        if (dirEntry.isFile) {
+            modelFiles.push(dirEntry.path.slice(getConfigPath().length + 1));
         }
-        // todo: log the success
-        return res;
     }
+    ctx.response.body = {
+        data: modelFiles.filter((fname) => !specialFiles.has(fname)).map(
+            (fname) => ({ id: fname.slice(0, -".toml".length) }),
+        ),
+    };
+});
+
+const configSchema = z.looseObject({
+    provider: z.string().optional(),
+    api_base: z.string().optional(),
+    api_key: z.string().optional(),
+    headers: z.record(z.string(), z.string()).default({}),
+    body: z.looseObject({}).default({}),
+});
+
+const globalConfigSchema = z.object({
+    providers: z.looseObject({}).catchall(
+        configSchema.omit({ provider: true }).required({ api_base: true })
+    ).default({}),
+});
+
+async function loadGlobalConfig() {
+    const path = getConfigPath() + "/config.toml";
+    try {
+        await Deno.lstat(path);
+    } catch (err) {
+        if (!(err instanceof Deno.errors.NotFound)) {
+            throw err;
+        }
+        await Deno.writeTextFile(path, "");
+    }
+    return globalConfigSchema.parse(toml.parse(await Deno.readTextFile(path)));
 }
 
-function attemptWith(methods) {
-    return async function () {
-        for (const method of methods) {
-            let res;
-            try {
-                res = method.apply(null, arguments);
-            } catch (err) {
-                // todo: log it
-                continue;
+const requestSchema = z.object({
+    model: z.string(),
+});
+
+type Headerable = {
+    headers?: Record<string, string>,
+    api_key?: string
+}
+
+function computeHeaders(obj: Headerable): Record<string, string> {
+    const headers = obj.headers ?? {}
+    if (obj.api_key) {
+        headers.authorization = "Bearer " + obj.api_key
+    }
+    return headers
+}
+
+router.post("/v1/completions", async (ctx, next) => {
+    let globalConfig, req, config;
+    try {
+        globalConfig = await loadGlobalConfig();
+        req = requestSchema.parse(await ctx.request.body.json());
+        const modelFileName = securePath(getConfigPath(), req.model + ".toml");
+        if (modelFileName == null) {
+            ctx.response.status = 400;
+            ctx.response.body = { errors: ["don't fuck with me m8"] };
+            return;
+        }
+        const decoder = new TextDecoder("utf-8");
+        if (!await fileExists(modelFileName)) {
+            // autoconfig
+            for (const [providerName, provider] of Object.entries(globalConfig.providers)) {
+                let models
+                try {
+                    const fetchRes = await fetch(provider.api_base + "/v1/models", { headers: computeHeaders(provider)})
+                    models = await fetchRes.json()
+                    for (const model of models.data) {
+                        if (model.id === req.model || model.hugging_face_id === req.model) {
+                            config = { provider: providerName }
+                            break
+                        }
+                    }
+                } catch (error) {
+                    console.log(providerName + req.model, error)
+                }
             }
-            return res;
-        }
-    };
-}
-
-/* Entry points */
-function configureModel(modelString, goal) {
-    if (goal === "soon") {
-    } else if (goal === "efficiently") {
-    } else if (goal === "reliable") {
-    }
-}
-
-/* High-level routines */
-function configureLocal(modelString) {
-    const parts = modelString.split("/");
-    let ogHfRepo; // original
-    let quantization;
-    if (parts.length >= 2) {
-        quantization = parts[parts.length - 1];
-        ogHfRepo = parts.slice(0, -1).join("/");
-    } else {
-        quantization = globalConfig.defaultQuant;
-        ogHfRepo = modelString;
-    }
-
-    await attemptForEach(getAvailableQuantRepos(ogHfRepo), (hfRepo) => {
-        const ggufPath = downloadGGUF(hfRepo, quantization);
-        const mlxRes = attempt(loadOnMLX)(ggufPath);
-        if (mlxRes === FailedAttempt) {
-            const llamaCppRes = attempt(loadOnLlamaCpp)(ggufPath);
-            if (llamaCppRes === FailedAttempt) {
-                throw new Error();
+            if (config == null) {
+                ctx.response.status = 404
+                ctx.response.body = {
+                    error: {
+                        message: "Could not find a provider that supports " + req.model,
+                        providersTried: Object.keys(globalConfig.providers)
+                    }
+                }
             } else {
+                await Deno.mkdir(dirname(modelFileName), { recursive: true })
+                await Deno.writeTextFile(modelFileName, toml.stringify(config))
             }
-        } else {
         }
-    });
-}
+        config = configSchema.parse(
+            toml.parse(decoder.decode(await Deno.readFile(modelFileName))),
+        );
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            ctx.response.status = 400;
+            ctx.response.body = { error: { message: "Invalid request or config", issues: error.issues, code: 400 }};
+            return;
+        }
+        throw error;
+    }
+    if (config.provider != null) {
+        const provider = globalConfig.providers?.[config.provider];
+        if (provider != null) {
+            config = merge(config, provider);
+        }
+    }
+    const modifiedBody = merge(await ctx.request.body.json(), config.body)
+    await proxy(config.api_base, {
+        headers: computeHeaders(config),
+        proxyHeaders: false,
+        request: (req) => {
+            if (modifiedBody) {
+                const newReq = new Request(req, {
+                    body: JSON.stringify(modifiedBody)
+                })
+                return newReq
+            } else return req
+        }
+    })(ctx, next);
+});
 
-// returns an async generator
-function getAvailableQuantRepos(model) {
-    return hfHub.listModels({
-        search: {
-            tags: ["base_model:quantized:" + model],
+// this will be supported eventually but isn't a priority
+router.post("/v1/chat/completions", async (ctx) => {
+    ctx.response.body = {
+        "id": "chatcmpl-chukei-gfys",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Go fuck yourself",
+                    "refusal": null,
+                    "annotations": [],
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+            },
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 3,
+            "total_tokens": 3,
         },
-    });
-}
+    };
+});
 
-/* Send a request to Modal serverless */
-async function quantizeModel(hfRepo) {
-}
+const app = new Application();
+app.use(router.routes());
+app.use(router.allowedMethods());
 
-/* Local inference */
-async function downloadGGUF(hfRepo, quantization) {
-}
-
-async function loadOnLlamaCpp(ggufPath) {
-}
-
-async function loadOnMLX(ggufPath) {
-}
-
-/* Human integration */
-async function askToven() {
-}
-
-async function askLithros() {
-}
-
-async function emailHuman() {
-}
+// todo: other interfaces to chukei
+await app.listen({ port: 6011 });

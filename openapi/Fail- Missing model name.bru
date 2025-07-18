@@ -1,0 +1,15 @@
+meta {
+  name: Fail: Missing model name
+  type: http
+  seq: 1
+}
+
+post {
+  url: http://localhost:6011/v1/completions
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {}
+}

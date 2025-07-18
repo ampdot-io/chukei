@@ -1,0 +1,15 @@
+{
+  "version": "1",
+  "name": "chukei",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ],
+  "size": 0.0001392364501953125,
+  "filesCount": 1,
+  "presets": {
+    "requestType": "http",
+    "requestUrl": "http://localhost:6011"
+  }
+}

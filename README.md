@@ -1,19 +1,48 @@
-# multimodel
+# chukei 🪭🔌
 
-Low-latency multi-model LLM inference with a focus on fast cold boot times.
+**Stability:** Alpha. Expect breaking changes!
 
-## Features
+[conduit 1.x](https://github.com/ampdot-io/conduit)
+is a language model (LLM) reverse proxy that acted as a compatibility
+layer between LLM API consumers and LLM providers based on the user's
 
-- [ ] Self-modifying with HMR and Claude Code / Codex integration
+chukei is also a language model reverse proxy service. However, when the
+user requests a language model that it lacks a configuration for, instead of
+returning 404 Not Found, it **agentically auto-configures itself**.
 
-## Hardware support
+**Author's note:** The current version is intended primarily for open-source
+models, and as such, only supports HuggingFace model IDs with a quantization
+suffix.
 
-By dynamically migrating models between backends with different cold boot times,
-we can maintain a consistently fast user experience. We boot models in the
-fastest backend when the first user request is received, and quietly move the
-model to a cheaper or more scalable backend, freeing up the fast backend to
-handle more cold boots.
+## New features compared to conduit
+- Streaming completions
+- TOML configuration
 
-- [ ] NVIDIA GPU on standby with CRIU
-- [ ] Modal Labs
+## Algorithm
+The agent attempts multiple strategies, keeping the connection open until one
+succeeds. For example, a typical run may include:
 
+1. Attempt to get the model from OpenRouter ✅
+2. Attempt to get the model from Featherless.ai ✅
+3. Attempt to use kobold.cpp to download and run the model locally 📋
+4. Attempt to run the model on Modal serverless GPUs 📋
+4. Send emails to contacts at inference partners to request support 📋
+
+## Roadmap
+- Multiple providers, failing over between them when one is unavailable
+
+## Reference
+
+All configuration is stored in `chukei.autoconfig` under your home directory.
+The root configuration file is config.toml, where you can configure providers:
+
+```
+[providers.openrouter]
+api_base = "https://openrouter.ai/api"
+api_key = "sk-or-v1-myapikey"
+```
+
+Do **not** include `/v1` or `/completions` in the `api_base`.
+
+Model-specific configurations are also stored in this directory. This format
+is undocumented and expected to change.
