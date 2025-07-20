@@ -59,6 +59,10 @@ const configSchema = z.looseObject({
 const globalConfigSchema = z.object({
     providers: z.looseObject({}).catchall(
         configSchema.omit({ provider: true }).required({ api_base: true })
+            .extend({
+                discoveryType: z.enum(["openai_models_list", "koboldcpp"])
+                    .default("openai_models_list"),
+            }),
     ).default({}),
 });
 
@@ -80,16 +84,16 @@ const requestSchema = z.object({
 });
 
 type Headerable = {
-    headers?: Record<string, string>,
-    api_key?: string
-}
+    headers?: Record<string, string>;
+    api_key?: string;
+};
 
 function computeHeaders(obj: Headerable): Record<string, string> {
-    const headers = obj.headers ?? {}
+    const headers = obj.headers ?? {};
     if (obj.api_key) {
-        headers.authorization = "Bearer " + obj.api_key
+        headers.authorization = "Bearer " + obj.api_key;
     }
-    return headers
+    return headers;
 }
 
 router.post("/v1/completions", async (ctx, next) => {
@@ -106,32 +110,48 @@ router.post("/v1/completions", async (ctx, next) => {
         const decoder = new TextDecoder("utf-8");
         if (!await fileExists(modelFileName)) {
             // autoconfig
-            for (const [providerName, provider] of Object.entries(globalConfig.providers)) {
-                let models
-                try {
-                    const fetchRes = await fetch(provider.api_base + "/v1/models", { headers: computeHeaders(provider)})
-                    models = await fetchRes.json()
-                    for (const model of models.data) {
-                        if (model.id === req.model || model.hugging_face_id === req.model) {
-                            config = { provider: providerName, body: { id: model.id } }
-                            break
+            for (
+                const [providerName, provider] of Object.entries(
+                    globalConfig.providers,
+                )
+            ) {
+                let models;
+                if (provider.discoveryType === "openai_models_list") {
+                    try {
+                        const fetchRes = await fetch(
+                            provider.api_base + "/v1/models",
+                            { headers: computeHeaders(provider) },
+                        );
+                        models = await fetchRes.json();
+                        for (const model of models.data) {
+                            if (
+                                model.id === req.model ||
+                                model.hugging_face_id === req.model
+                            ) {
+                                config = {
+                                    provider: providerName,
+                                    body: { id: model.id },
+                                };
+                                break;
+                            }
                         }
+                    } catch (error) {
+                        console.log(providerName + req.model, error);
                     }
-                } catch (error) {
-                    console.log(providerName + req.model, error)
                 }
             }
             if (config == null) {
-                ctx.response.status = 404
+                ctx.response.status = 404;
                 ctx.response.body = {
                     error: {
-                        message: "Could not find a provider that supports " + req.model,
-                        providersTried: Object.keys(globalConfig.providers)
-                    }
-                }
+                        message: "Could not find a provider that supports " +
+                            req.model,
+                        providersTried: Object.keys(globalConfig.providers),
+                    },
+                };
             } else {
-                await Deno.mkdir(dirname(modelFileName), { recursive: true })
-                await Deno.writeTextFile(modelFileName, toml.stringify(config))
+                await Deno.mkdir(dirname(modelFileName), { recursive: true });
+                await Deno.writeTextFile(modelFileName, toml.stringify(config));
             }
         }
         config = configSchema.parse(
@@ -140,7 +160,13 @@ router.post("/v1/completions", async (ctx, next) => {
     } catch (error) {
         if (error instanceof z.ZodError) {
             ctx.response.status = 400;
-            ctx.response.body = { error: { message: "Invalid request or config", issues: error.issues, code: 400 }};
+            ctx.response.body = {
+                error: {
+                    message: "Invalid request or config",
+                    issues: error.issues,
+                    code: 400,
+                },
+            };
             return;
         }
         throw error;
@@ -151,18 +177,18 @@ router.post("/v1/completions", async (ctx, next) => {
             config = merge(config, provider);
         }
     }
-    const modifiedBody = merge(await ctx.request.body.json(), config.body)
+    const modifiedBody = merge(await ctx.request.body.json(), config.body);
     await proxy(config.api_base, {
         headers: computeHeaders(config),
         proxyHeaders: false,
         request: (req) => {
             if (modifiedBody) {
                 const newReq = new Request(req, {
-                    body: JSON.stringify(modifiedBody)
-                })
-                return newReq
-            } else return req
-        }
+                    body: JSON.stringify(modifiedBody),
+                });
+                return newReq;
+            } else return req;
+        },
     })(ctx, next);
 });
 
