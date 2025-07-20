@@ -113,7 +113,7 @@ router.post("/v1/completions", async (ctx, next) => {
                     models = await fetchRes.json()
                     for (const model of models.data) {
                         if (model.id === req.model || model.hugging_face_id === req.model) {
-                            config = { provider: providerName }
+                            config = { provider: providerName, body: { id: model.id } }
                             break
                         }
                     }
