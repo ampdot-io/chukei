@@ -128,7 +128,7 @@ async function handleRequest(ctx: Context, next: Next) {
                             ) {
                                 config = {
                                     provider: providerName,
-                                    body: { id: model.id },
+                                    body: { model: model.id },
                                 };
                                 break;
                             }
