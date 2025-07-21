@@ -12,8 +12,6 @@ import { walk } from "jsr:@std/fs/walk";
 import { securePath } from "./util.ts";
 import merge from "npm:merge-deep";
 import { exists as fileExists } from "jsr:@std/fs/exists";
-import { json } from "node:stream/consumers";
-import { Buffer } from "node:buffer";
 import { dirname } from "node:path";
 
 const router = new Router();
@@ -96,7 +94,7 @@ function computeHeaders(obj: Headerable): Record<string, string> {
     return headers;
 }
 
-router.post("/v1/completions", async (ctx, next) => {
+async function handleRequest(ctx: Context, next: Next) {
     let globalConfig, req, config;
     try {
         globalConfig = await loadGlobalConfig();
@@ -190,33 +188,12 @@ router.post("/v1/completions", async (ctx, next) => {
             } else return req;
         },
     })(ctx, next);
-});
+}
+
+router.post("/v1/completions", handleRequest);
 
 // this will be supported eventually but isn't a priority
-router.post("/v1/chat/completions", async (ctx) => {
-    ctx.response.body = {
-        "id": "chatcmpl-chukei-gfys",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Go fuck yourself",
-                    "refusal": null,
-                    "annotations": [],
-                },
-                "logprobs": null,
-                "finish_reason": "stop",
-            },
-        ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 3,
-            "total_tokens": 3,
-        },
-    };
-});
+router.post("/v1/chat/completions",handleRequest);
 
 const app = new Application();
 app.use(router.routes());
