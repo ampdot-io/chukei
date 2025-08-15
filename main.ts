@@ -9,10 +9,11 @@ import * as z from "npm:zod";
 import os from "node:os";
 import * as toml from "jsr:@std/toml";
 import { walk } from "jsr:@std/fs/walk";
-import { securePath } from "./util.ts";
+import { getQuantizationType, QuantInfo, securePath } from "./util.ts";
 import merge from "npm:merge-deep";
 import { exists as fileExists } from "jsr:@std/fs/exists";
 import { dirname } from "node:path";
+import * as hfHub from "https://esm.sh/@huggingface/hub";
 
 const router = new Router();
 
@@ -46,7 +47,9 @@ router.get("/v1/models", async (ctx) => {
     };
 });
 
+// underscores for configuration
 const configSchema = z.looseObject({
+    // needs to be changed to support multiple providers for one model
     provider: z.string().optional(),
     api_base: z.string().optional(),
     api_key: z.string().optional(),
@@ -54,14 +57,32 @@ const configSchema = z.looseObject({
     body: z.looseObject({}).default({}),
 });
 
+const KoboldProvider = z.object({
+    discovery_type: z.literal("koboldcpp"),
+    kobold_path: z.string(),
+    quantization: z.object({
+        precision: z.string().default("Q5_K_M"),
+        prefer_correct_precision: z.number().default(10000),
+        prefer_imatrix: z.number().default(100),
+        prefer_same_owner: z.number().default(10),
+        tiebreak_strategy: z.literal(["random", "popular"]),
+    }),
+});
+
+const ProviderExtension = z.discriminatedUnion("discovery_type", [
+    KoboldProvider,
+    z.object({
+        discovery_type: z.literal("openai_models_list").optional().default(
+            "openai_models_list",
+        ),
+    }),
+]);
+const Provider = configSchema.omit({ provider: true }).required({
+    api_base: true,
+}).extend(ProviderExtension);
+
 const globalConfigSchema = z.object({
-    providers: z.looseObject({}).catchall(
-        configSchema.omit({ provider: true }).required({ api_base: true })
-            .extend({
-                discoveryType: z.enum(["openai_models_list", "koboldcpp"])
-                    .default("openai_models_list"),
-            }),
-    ).default({}),
+    providers: z.looseObject({}).catchall(Provider),
 });
 
 async function loadGlobalConfig() {
@@ -94,6 +115,21 @@ function computeHeaders(obj: Headerable): Record<string, string> {
     return headers;
 }
 
+interface HfQuant {
+    model: hfHub.ModelEntry;
+    files: hfHub.ListFileEntry[];
+    path: string;
+    preferenceScore: number;
+    quantInfo: QuantInfo;
+}
+
+function betterQuantization(modelA: HfQuant, modelB: HfQuant) {
+    const hasIMatrix = (file: hfHub.ListFileEntry) =>
+        file.path.includes("imatrix");
+    modelA.files.some(hasIMatrix);
+    modelA.files.some(hasIMatrix);
+}
+
 async function handleRequest(ctx: Context, next: Next) {
     let globalConfig, req, config;
     try {
@@ -114,7 +150,7 @@ async function handleRequest(ctx: Context, next: Next) {
                 )
             ) {
                 let models;
-                if (provider.discoveryType === "openai_models_list") {
+                if (provider.discovery_type === "openai_models_list") {
                     try {
                         const fetchRes = await fetch(
                             provider.api_base + "/v1/models",
@@ -136,6 +172,93 @@ async function handleRequest(ctx: Context, next: Next) {
                     } catch (error) {
                         console.log(providerName + req.model, error);
                     }
+                } else if (provider.discovery_type === "koboldcpp") {
+                    const koboldProvider = provider as unknown as z.infer<
+                        typeof KoboldProvider
+                    >;
+                    const quants: HfQuant[] = [];
+                    // todo: support already quantized models
+                    for await (
+                        const quantMeta of hfHub.listModels({
+                            search: {
+                                tags: ["base_model:quantized:" + modelFileName],
+                            },
+                        })
+                    ) {
+                        if (
+                            quantMeta.id.includes("exl2") ||
+                            quantMeta.id.includes("exl3")
+                        ) {
+                            continue;
+                        }
+                        const files = await Array.fromAsync(
+                            hfHub.listFiles({ repo: quantMeta.id }),
+                        );
+                        let preferenceScore = 0;
+                        if (
+                            files.some((file) => file.path.includes("imatrix"))
+                        ) {
+                            preferenceScore +=
+                                koboldProvider.quantization.prefer_imatrix;
+                        }
+                        if (
+                            quantMeta.id.split("/")[0] ===
+                                modelFileName.split("/")[0]
+                        ) {
+                            preferenceScore +=
+                                koboldProvider.quantization.prefer_same_owner;
+                        }
+                        for (const fileEntry of files) {
+                            if (fileEntry.path.endsWith(".gguf")) {
+                                const quantInfo = await getQuantizationType(
+                                    quantMeta.id,
+                                    fileEntry.path,
+                                );
+                                if (
+                                    quantInfo?.quantLevel ===
+                                        koboldProvider.quantization.precision
+                                ) {
+                                    preferenceScore +=
+                                        koboldProvider.quantization
+                                            .prefer_correct_precision;
+                                }
+                                quants.push({
+                                    model: quantMeta,
+                                    files,
+                                    path: fileEntry.path,
+                                    preferenceScore: preferenceScore,
+                                    quantInfo,
+                                });
+                            }
+                        }
+                    }
+                    const bestQuantizations = (() => {
+                        const maxPref = Math.max(...quants.map(quant => quant.preferenceScore))
+                        return quants.filter(quant => quant.preferenceScore === maxPref)
+                    })()
+                    let selectedQuantization
+                    if (
+                        koboldProvider.quantization.tiebreak_strategy ===
+                            "random"
+                    ) {
+                        selectedQuantization = bestQuantizations[(Math.random() * bestQuantizations.length) - 1]
+                    }
+                    // strategy
+                    // prefer imatrix, prefer original model creator
+                    // random, popular
+                    const command = new Deno.Command(
+                        koboldProvider.kobold_path,
+                        {
+                            args: [
+                                "--multiuser",
+                                "--skiplauncher",
+                                "--model",
+                                "",
+                            ],
+                        },
+                    );
+
+                    const flags = `--multiuser --skiplauncher --model `;
                 }
             }
             if (config == null) {
@@ -192,8 +315,7 @@ async function handleRequest(ctx: Context, next: Next) {
 
 router.post("/v1/completions", handleRequest);
 
-// this will be supported eventually but isn't a priority
-router.post("/v1/chat/completions",handleRequest);
+router.post("/v1/chat/completions", handleRequest);
 
 const app = new Application();
 app.use(router.routes());
