@@ -57,7 +57,11 @@ const configSchema = z.looseObject({
     body: z.looseObject({}).default({}),
 });
 
-const KoboldProvider = z.object({
+const baseProviderSchema = configSchema.omit({ provider: true }).required({
+    api_base: true,
+});
+
+const KoboldProvider = baseProviderSchema.extend({
     discovery_type: z.literal("koboldcpp"),
     kobold_path: z.string(),
     quantization: z.object({
@@ -69,17 +73,16 @@ const KoboldProvider = z.object({
     }),
 });
 
-const ProviderExtension = z.discriminatedUnion("discovery_type", [
+const OpenAIProvider = baseProviderSchema.extend({
+    discovery_type: z.literal("openai_models_list").optional().default(
+        "openai_models_list",
+    ),
+});
+
+const Provider = z.discriminatedUnion("discovery_type", [
     KoboldProvider,
-    z.object({
-        discovery_type: z.literal("openai_models_list").optional().default(
-            "openai_models_list",
-        ),
-    }),
+    OpenAIProvider,
 ]);
-const Provider = configSchema.omit({ provider: true }).required({
-    api_base: true,
-}).extend(ProviderExtension);
 
 const globalConfigSchema = z.object({
     providers: z.looseObject({}).catchall(Provider),
