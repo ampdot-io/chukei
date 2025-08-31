@@ -95,10 +95,11 @@ function computeHeaders(obj: Headerable): Record<string, string> {
 }
 
 async function handleRequest(ctx: Context, next: Next) {
-    let globalConfig, req, config;
+    let globalConfig, req, config, originalBody;
     try {
         globalConfig = await loadGlobalConfig();
-        req = requestSchema.parse(await ctx.request.body.json());
+        originalBody = await ctx.request.body.json();
+        req = requestSchema.parse(originalBody);
         const modelFileName = securePath(getConfigPath(), req.model + ".toml");
         if (modelFileName == null) {
             ctx.response.status = 400;
@@ -175,7 +176,7 @@ async function handleRequest(ctx: Context, next: Next) {
             config = merge(config, provider);
         }
     }
-    const modifiedBody = merge(await ctx.request.body.json(), config.body);
+    const modifiedBody = merge(originalBody, config.body);
     await proxy(config.api_base, {
         headers: computeHeaders(config),
         proxyHeaders: false,
@@ -193,7 +194,7 @@ async function handleRequest(ctx: Context, next: Next) {
 router.post("/v1/completions", handleRequest);
 
 // this will be supported eventually but isn't a priority
-router.post("/v1/chat/completions",handleRequest);
+router.post("/v1/chat/completions", handleRequest);
 
 const app = new Application();
 app.use(router.routes());
