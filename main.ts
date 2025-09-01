@@ -125,7 +125,8 @@ async function handleRequest(ctx: Context, next: Next) {
                         for (const model of models.data) {
                             if (
                                 model.id === req.model ||
-                                model.hugging_face_id === req.model
+                                // OpenRouter does not consistently use the same casing
+                                model.hugging_face_id.toLowerCase() === req.model.toLowerCase()
                             ) {
                                 config = {
                                     provider: providerName,
