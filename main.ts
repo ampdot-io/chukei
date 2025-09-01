@@ -108,6 +108,7 @@ async function handleRequest(ctx: Context, next: Next) {
         }
         const decoder = new TextDecoder("utf-8");
         if (!await fileExists(modelFileName)) {
+            console.log(`Attempting to autoconfigure ${req.model}`)
             // autoconfig
             for (
                 const [providerName, provider] of Object.entries(
@@ -117,6 +118,7 @@ async function handleRequest(ctx: Context, next: Next) {
                 let models;
                 if (provider.discoveryType === "openai_models_list") {
                     try {
+                        console.log(`Checking /v1/models for: ${providerName}`)
                         const fetchRes = await fetch(
                             provider.api_base + "/v1/models",
                             { headers: computeHeaders(provider) },
@@ -124,10 +126,11 @@ async function handleRequest(ctx: Context, next: Next) {
                         models = await fetchRes.json();
                         for (const model of models.data) {
                             if (
-                                model.id === req.model ||
+                                model.id.toLowerCase() === req.model.toLocaleLowerCase() ||
                                 // OpenRouter does not consistently use the same casing
                                 model.hugging_face_id.toLowerCase() === req.model.toLowerCase()
                             ) {
+                                console.log("Found!")
                                 config = {
                                     provider: providerName,
                                     body: { model: model.id },
@@ -136,6 +139,7 @@ async function handleRequest(ctx: Context, next: Next) {
                             }
                         }
                     } catch (error) {
+                        console.log(`Encountered error: ${providerName}`)
                         console.log(providerName + req.model, error);
                     }
                 }
