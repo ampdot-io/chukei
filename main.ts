@@ -201,4 +201,8 @@ app.use(router.routes());
 app.use(router.allowedMethods());
 
 // todo: other interfaces to chukei
-await app.listen({ port: 6011 });
+await app.listen({
+    port: 6011,
+    // Deno docs are wrong and adding this is required to listen on public interfaces
+    hostname: "0.0.0.0",
+});
