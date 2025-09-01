@@ -126,9 +126,9 @@ async function handleRequest(ctx: Context, next: Next) {
                         models = await fetchRes.json();
                         for (const model of models.data) {
                             if (
-                                model.id.toLowerCase() === req.model.toLocaleLowerCase() ||
+                                model?.id?.toLowerCase() === req.model.toLowerCase() ||
                                 // OpenRouter does not consistently use the same casing
-                                model.hugging_face_id.toLowerCase() === req.model.toLowerCase()
+                                model?.hugging_face_id?.toLowerCase() === req.model.toLowerCase()
                             ) {
                                 console.log("Found!")
                                 config = {
@@ -139,8 +139,7 @@ async function handleRequest(ctx: Context, next: Next) {
                             }
                         }
                     } catch (error) {
-                        console.log(`Encountered error: ${providerName}`)
-                        console.log(providerName + req.model, error);
+                        console.log(`Encountered error: ${providerName}`, req.model, error);
                     }
                 }
             }
