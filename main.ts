@@ -7,15 +7,25 @@ import {
 } from "https://deno.land/x/oak/mod.ts";
 import * as z from "npm:zod";
 import os from "node:os";
-import * as toml from "jsr:@std/toml";
-import { walk } from "jsr:@std/fs/walk";
+import * as toml from "https://deno.land/std@0.224.0/toml/mod.ts";
+import { walk } from "https://deno.land/std@0.224.0/fs/walk.ts";
 import { getQuantizationType, QuantInfo, securePath } from "./util.ts";
 import merge from "npm:merge-deep";
-import { exists as fileExists } from "jsr:@std/fs/exists";
+import { exists as fileExists } from "https://deno.land/std@0.224.0/fs/exists.ts";
 import { dirname } from "node:path";
 import * as hfHub from "https://esm.sh/@huggingface/hub";
 
 const router = new Router();
+
+// Track running koboldcpp processes so we can manage memory
+const runningModels = new Map<
+    string,
+    { proc: Deno.ChildProcess; lastUsed: number; memory: number; port: number }
+>();
+
+async function ensureModelsPath() {
+    await Deno.mkdir(os.homedir() + "/models", { recursive: true });
+}
 
 function getConfigPath() {
     return os.homedir() + "/chukei.autoconfig";
@@ -134,10 +144,13 @@ function betterQuantization(modelA: HfQuant, modelB: HfQuant) {
 }
 
 async function handleRequest(ctx: Context, next: Next) {
-    let globalConfig, req, config;
+    let globalConfig, req, config, originalBody;
     try {
         globalConfig = await loadGlobalConfig();
-        req = requestSchema.parse(await ctx.request.body.json());
+        originalBody = await ctx.request.body.json();
+        req = requestSchema.parse(originalBody);
+        const running = runningModels.get(req.model);
+        if (running) running.lastUsed = Date.now();
         const modelFileName = securePath(getConfigPath(), req.model + ".toml");
         if (modelFileName == null) {
             ctx.response.status = 400;
@@ -146,6 +159,7 @@ async function handleRequest(ctx: Context, next: Next) {
         }
         const decoder = new TextDecoder("utf-8");
         if (!await fileExists(modelFileName)) {
+            console.log(`Attempting to autoconfigure ${req.model}`);
             // autoconfig
             for (
                 const [providerName, provider] of Object.entries(
@@ -155,6 +169,7 @@ async function handleRequest(ctx: Context, next: Next) {
                 let models;
                 if (provider.discovery_type === "openai_models_list") {
                     try {
+                        console.log(`Checking /v1/models for: ${providerName}`);
                         const fetchRes = await fetch(
                             provider.api_base + "/v1/models",
                             { headers: computeHeaders(provider) },
@@ -162,9 +177,13 @@ async function handleRequest(ctx: Context, next: Next) {
                         models = await fetchRes.json();
                         for (const model of models.data) {
                             if (
-                                model.id === req.model ||
-                                model.hugging_face_id === req.model
+                                model?.id?.toLowerCase() ===
+                                    req.model.toLowerCase() ||
+                                // OpenRouter does not consistently use the same casing
+                                model?.hugging_face_id?.toLowerCase() ===
+                                    req.model.toLowerCase()
                             ) {
+                                console.log("Found!");
                                 config = {
                                     provider: providerName,
                                     body: { model: model.id },
@@ -173,7 +192,11 @@ async function handleRequest(ctx: Context, next: Next) {
                             }
                         }
                     } catch (error) {
-                        console.log(providerName + req.model, error);
+                        console.log(
+                            `Encountered error: ${providerName}`,
+                            req.model,
+                            error,
+                        );
                     }
                 } else if (provider.discovery_type === "koboldcpp") {
                     const koboldProvider = provider as unknown as z.infer<
@@ -184,7 +207,7 @@ async function handleRequest(ctx: Context, next: Next) {
                     for await (
                         const quantMeta of hfHub.listModels({
                             search: {
-                                tags: ["base_model:quantized:" + modelFileName],
+                                tags: ["base_model:quantized:" + req.model],
                             },
                         })
                     ) {
@@ -225,43 +248,105 @@ async function handleRequest(ctx: Context, next: Next) {
                                         koboldProvider.quantization
                                             .prefer_correct_precision;
                                 }
-                                quants.push({
+                                const entry = {
                                     model: quantMeta,
                                     files,
                                     path: fileEntry.path,
                                     preferenceScore: preferenceScore,
                                     quantInfo,
-                                });
+                                };
+                                console.log("Quantization candidate", entry);
+                                quants.push(entry);
                             }
                         }
                     }
                     const bestQuantizations = (() => {
-                        const maxPref = Math.max(...quants.map(quant => quant.preferenceScore))
-                        return quants.filter(quant => quant.preferenceScore === maxPref)
-                    })()
-                    let selectedQuantization
+                        const maxPref = Math.max(
+                            ...quants.map((quant) => quant.preferenceScore),
+                        );
+                        return quants.filter((quant) =>
+                            quant.preferenceScore === maxPref
+                        );
+                    })();
+                    let selectedQuantization;
                     if (
                         koboldProvider.quantization.tiebreak_strategy ===
                             "random"
                     ) {
-                        selectedQuantization = bestQuantizations[(Math.random() * bestQuantizations.length) - 1]
+                        selectedQuantization = bestQuantizations[
+                            Math.floor(
+                                Math.random() * bestQuantizations.length,
+                            )
+                        ];
+                    } else {
+                        selectedQuantization = bestQuantizations[0];
                     }
-                    // strategy
-                    // prefer imatrix, prefer original model creator
-                    // random, popular
+                    console.log("Selected quantization", selectedQuantization);
+
+                    await ensureModelsPath();
+                    const fileEntry = selectedQuantization.files.find((f) =>
+                        f.path === selectedQuantization.path
+                    );
+                    const requiredMem = fileEntry?.size ?? 0;
+                    let available = Deno.systemMemoryInfo().available;
+                    if (requiredMem > available) {
+                        const entries = [...runningModels.entries()].sort((
+                            a,
+                            b,
+                        ) => a[1].lastUsed - b[1].lastUsed);
+                        for (const [modelName, info] of entries) {
+                            console.log("Killing LRU process", modelName);
+                            info.proc.kill("SIGKILL");
+                            runningModels.delete(modelName);
+                            available = Deno.systemMemoryInfo().available;
+                            if (requiredMem <= available) break;
+                        }
+                    }
+                    const modelsPath = os.homedir() + "/models";
+                    const localModelPath = modelsPath + "/" +
+                        selectedQuantization.path.split("/").pop();
+                    if (!await fileExists(localModelPath)) {
+                        const downloadUrl =
+                            `https://huggingface.co/${selectedQuantization.model.id}/resolve/main/${selectedQuantization.path}`;
+                        console.log("Downloading model", downloadUrl);
+                        const res = await fetch(downloadUrl);
+                        if (!res.ok || !res.body) {
+                            throw new Error("Failed to download model");
+                        }
+                        const file = await Deno.open(localModelPath, {
+                            create: true,
+                            write: true,
+                            truncate: true,
+                        });
+                        await res.body.pipeTo(file.writable);
+                    }
+
+                    const port = 7000 + runningModels.size;
                     const command = new Deno.Command(
                         koboldProvider.kobold_path,
                         {
                             args: [
                                 "--multiuser",
                                 "--skiplauncher",
+                                "--port",
+                                String(port),
                                 "--model",
-                                "",
+                                localModelPath,
                             ],
                         },
                     );
-
-                    const flags = `--multiuser --skiplauncher --model `;
+                    const proc = command.spawn();
+                    runningModels.set(req.model, {
+                        proc,
+                        lastUsed: Date.now(),
+                        memory: requiredMem,
+                        port,
+                    });
+                    config = {
+                        api_base: `http://127.0.0.1:${port}`,
+                        headers: {},
+                        body: {},
+                    };
                 }
             }
             if (config == null) {
@@ -301,7 +386,7 @@ async function handleRequest(ctx: Context, next: Next) {
             config = merge(config, provider);
         }
     }
-    const modifiedBody = merge(await ctx.request.body.json(), config.body);
+    const modifiedBody = merge(originalBody, config.body);
     await proxy(config.api_base, {
         headers: computeHeaders(config),
         proxyHeaders: false,
@@ -317,7 +402,7 @@ async function handleRequest(ctx: Context, next: Next) {
 }
 
 router.post("/v1/completions", handleRequest);
-
+// this will be supported eventually but isn't a priority
 router.post("/v1/chat/completions", handleRequest);
 
 const app = new Application();
@@ -325,4 +410,8 @@ app.use(router.routes());
 app.use(router.allowedMethods());
 
 // todo: other interfaces to chukei
-await app.listen({ port: 6011 });
+await app.listen({
+    port: 6011,
+    // Deno docs are wrong and adding this is required to listen on public interfaces
+    hostname: "0.0.0.0",
+});
