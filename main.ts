@@ -264,6 +264,9 @@ async function handleRequest(ctx: Context, next: Next) {
                     } catch (err) {
                         console.log("Error listing files for", req.model, err);
                     }
+                    if (quants.length === 0) {
+                        console.log("No quantizations found in", req.model);
+                    }
                     const bestQuantizations = (() => {
                         const maxPref = Math.max(
                             ...quants.map((quant) => quant.preferenceScore),
@@ -311,10 +314,9 @@ async function handleRequest(ctx: Context, next: Next) {
                         }
                     }
                     const modelsPath = os.homedir() + "/models";
-                    const author = selectedQuantization.model.id.split("/")[0];
-                    const authorDir = modelsPath + "/" + author;
-                    await Deno.mkdir(authorDir, { recursive: true });
-                    const localModelPath = authorDir + "/" +
+                    const repoDir = modelsPath + "/" + selectedQuantization.model.id;
+                    await Deno.mkdir(repoDir, { recursive: true });
+                    const localModelPath = repoDir + "/" +
                         selectedQuantization.path.split("/").pop();
                     if (!await fileExists(localModelPath)) {
                         const downloadUrl =
