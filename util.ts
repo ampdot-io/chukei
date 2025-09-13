@@ -1,4 +1,4 @@
-import * as path from "jsr:@std/path";
+import * as path from "https://deno.land/std@0.224.0/path/mod.ts";
 import * as nodePath from "node:path";
 import { gguf } from "npm:@huggingface/gguf";
 
@@ -95,9 +95,9 @@ export async function getQuantizationType(
     } else {
         quantLevel = ggufNameData.Encoding;
     }
-    const quantType = path.match(`-(rekaquant|UD)-${quantLevel}`);
-    if (quantType != null) {
-        return { quantType, quantLevel };
+    const quantTypeMatch = path.match(`-(rekaquant|UD)-${quantLevel}`);
+    if (quantTypeMatch != null) {
+        return { quantType: quantTypeMatch[0], quantLevel };
     } else {
         return { quantLevel };
     }
