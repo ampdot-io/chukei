@@ -252,12 +252,9 @@ async function handleRequest(ctx: Context, next: Next) {
                                     preferenceScore,
                                     quantInfo,
                                 };
-                                console.log("Quantization candidate", {
-                                    model: entry.model.id,
-                                    path: entry.path,
-                                    preferenceScore: entry.preferenceScore,
-                                    quantLevel: entry.quantInfo?.quantLevel,
-                                });
+                                console.log(
+                                    `Candidate quant ${entry.path} @ ${entry.quantInfo?.quantLevel} (preference score ${entry.preferenceScore})`,
+                                );
                                 quants.push(entry);
                             }
                         }
@@ -314,7 +311,8 @@ async function handleRequest(ctx: Context, next: Next) {
                         }
                     }
                     const modelsPath = os.homedir() + "/models";
-                    const repoDir = modelsPath + "/" + selectedQuantization.model.id;
+                    const repoDir = modelsPath + "/" +
+                        selectedQuantization.model.id;
                     await Deno.mkdir(repoDir, { recursive: true });
                     const localModelPath = repoDir + "/" +
                         selectedQuantization.path.split("/").pop();
