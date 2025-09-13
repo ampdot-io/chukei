@@ -65,6 +65,8 @@ const configSchema = z.looseObject({
     api_key: z.string().optional(),
     headers: z.record(z.string(), z.string()).default({}),
     body: z.looseObject({}).default({}),
+    kobold_path: z.string().optional(),
+    model_path: z.string().optional(),
 });
 
 const baseProviderSchema = configSchema.omit({ provider: true }).required({
@@ -346,6 +348,8 @@ async function handleRequest(ctx: Context, next: Next) {
                         api_base: `http://127.0.0.1:${port}`,
                         headers: {},
                         body: {},
+                        kobold_path: koboldProvider.kobold_path,
+                        model_path: localModelPath,
                     };
                 }
             }
@@ -366,6 +370,47 @@ async function handleRequest(ctx: Context, next: Next) {
         config = configSchema.parse(
             toml.parse(decoder.decode(await Deno.readFile(modelFileName))),
         );
+        if (
+            !runningModels.has(req.model) &&
+            config.kobold_path &&
+            config.model_path
+        ) {
+            const stat = await Deno.stat(config.model_path).catch(() => null);
+            const requiredMem = stat?.size ?? 0;
+            let available = Deno.systemMemoryInfo().available;
+            if (requiredMem > available) {
+                const entries = [...runningModels.entries()].sort((a, b) =>
+                    a[1].lastUsed - b[1].lastUsed
+                );
+                for (const [modelName, info] of entries) {
+                    console.log("Killing LRU process", modelName);
+                    info.proc.kill("SIGKILL");
+                    runningModels.delete(modelName);
+                    available = Deno.systemMemoryInfo().available;
+                    if (requiredMem <= available) break;
+                }
+            }
+            const port = 55000 + runningModels.size;
+            const command = new Deno.Command(config.kobold_path, {
+                args: [
+                    "--multiuser",
+                    "--skiplauncher",
+                    "--port",
+                    String(port),
+                    "--model",
+                    config.model_path,
+                ],
+            });
+            const proc = command.spawn();
+            runningModels.set(req.model, {
+                proc,
+                lastUsed: Date.now(),
+                memory: requiredMem,
+                port,
+            });
+            config.api_base = `http://127.0.0.1:${port}`;
+            await Deno.writeTextFile(modelFileName, toml.stringify(config));
+        }
     } catch (error) {
         if (error instanceof z.ZodError) {
             ctx.response.status = 400;
