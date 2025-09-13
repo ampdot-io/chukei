@@ -321,7 +321,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         await res.body.pipeTo(file.writable);
                     }
 
-                    const port = 7000 + runningModels.size;
+                    const port = 55000 + runningModels.size;
                     const command = new Deno.Command(
                         koboldProvider.kobold_path,
                         {
