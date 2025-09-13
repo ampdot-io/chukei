@@ -174,6 +174,7 @@ async function handleRequest(ctx: Context, next: Next) {
         }
         const decoder = new TextDecoder("utf-8");
         if (!await fileExists(modelFileName)) {
+            // TODO: Does not take into account possibility of a model provider failing or handle failover
             console.log(`Attempting to autoconfigure ${req.model}`);
             // autoconfig
             for (
@@ -198,7 +199,7 @@ async function handleRequest(ctx: Context, next: Next) {
                                 model?.hugging_face_id?.toLowerCase() ===
                                     req.model.toLowerCase()
                             ) {
-                                console.log("Found!");
+                                console.log(`Found ${req.model} on ${providerName}!`);
                                 config = {
                                     provider: providerName,
                                     body: { model: model.id },
@@ -350,6 +351,9 @@ async function handleRequest(ctx: Context, next: Next) {
                         model_path: localModelPath,
                     };
                 }
+                if (config != null) {
+                    break;
+                }
             }
             if (config == null) {
                 ctx.response.status = 404;
@@ -421,8 +425,16 @@ async function handleRequest(ctx: Context, next: Next) {
                 },
             };
             return;
+        } else {
+            ctx.response.status = 500;
+            ctx.response.body = {
+                error: {
+                    message: "Internal server error",
+                    stack: error.stack,
+                    code: 500,
+                }
+            }
         }
-        throw error;
     }
     if (config.provider != null) {
         const provider = globalConfig.providers?.[config.provider];
