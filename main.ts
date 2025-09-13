@@ -299,7 +299,10 @@ async function handleRequest(ctx: Context, next: Next) {
                         }
                     }
                     const modelsPath = os.homedir() + "/models";
-                    const localModelPath = modelsPath + "/" +
+                    const author = selectedQuantization.model.id.split("/")[0];
+                    const authorDir = modelsPath + "/" + author;
+                    await Deno.mkdir(authorDir, { recursive: true });
+                    const localModelPath = authorDir + "/" +
                         selectedQuantization.path.split("/").pop();
                     if (!await fileExists(localModelPath)) {
                         const downloadUrl =
