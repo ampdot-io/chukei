@@ -199,7 +199,9 @@ async function handleRequest(ctx: Context, next: Next) {
                                 model?.hugging_face_id?.toLowerCase() ===
                                     req.model.toLowerCase()
                             ) {
-                                console.log(`Found ${req.model} on ${providerName}!`);
+                                console.log(
+                                    `Found ${req.model} on ${providerName}!`,
+                                );
                                 config = {
                                     provider: providerName,
                                     body: { model: model.id },
@@ -250,7 +252,12 @@ async function handleRequest(ctx: Context, next: Next) {
                                     preferenceScore,
                                     quantInfo,
                                 };
-                                console.log("Quantization candidate", entry);
+                                console.log("Quantization candidate", {
+                                    model: entry.model.id,
+                                    path: entry.path,
+                                    preferenceScore: entry.preferenceScore,
+                                    quantLevel: entry.quantInfo?.quantLevel,
+                                });
                                 quants.push(entry);
                             }
                         }
@@ -278,7 +285,11 @@ async function handleRequest(ctx: Context, next: Next) {
                     } else {
                         selectedQuantization = bestQuantizations[0];
                     }
-                    console.log("Selected quantization", selectedQuantization);
+                    console.log("Selected quantization", {
+                        path: selectedQuantization.path,
+                        preferenceScore: selectedQuantization.preferenceScore,
+                        quantLevel: selectedQuantization.quantInfo?.quantLevel,
+                    });
 
                     await ensureModelsPath();
                     const fileEntry = selectedQuantization.files.find((f) =>
@@ -402,8 +413,19 @@ async function handleRequest(ctx: Context, next: Next) {
                     "--model",
                     config.model_path,
                 ],
+                stderr: "piped",
             });
             const proc = command.spawn();
+            const stderrPath =
+                `${getConfigPath()}/koboldcpp.${proc.pid}.stderr`;
+            const stderrFile = await Deno.open(stderrPath, {
+                create: true,
+                write: true,
+                truncate: true,
+            });
+            proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
+                console.error("Failed to pipe koboldcpp stderr", err)
+            );
             runningModels.set(req.model, {
                 proc,
                 lastUsed: Date.now(),
@@ -432,8 +454,8 @@ async function handleRequest(ctx: Context, next: Next) {
                     message: "Internal server error",
                     stack: error.stack,
                     code: 500,
-                }
-            }
+                },
+            };
         }
     }
     if (config.provider != null) {
@@ -464,6 +486,10 @@ router.post("/v1/chat/completions", handleRequest);
 const app = new Application();
 app.use(router.routes());
 app.use(router.allowedMethods());
+
+app.addEventListener("listen", ({ hostname, port }) => {
+    console.log(`HTTP server listening on ${hostname}:${port}`);
+});
 
 // todo: other interfaces to chukei
 await app.listen({
