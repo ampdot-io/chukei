@@ -35,6 +35,19 @@ async function ensureModelsDir() {
     await Deno.mkdir(getConfigPath(), { recursive: true });
 }
 
+async function waitForPort(port: number) {
+    for (let i = 0; i < 60; i++) {
+        try {
+            const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+            conn.close();
+            return;
+        } catch {
+            await new Promise((r) => setTimeout(r, 500));
+        }
+    }
+    throw new Error(`Timeout waiting for port ${port}`);
+}
+
 const specialFiles = new Set(["config.toml"]);
 
 router.get("/v1/models", async (ctx) => {
@@ -205,41 +218,20 @@ async function handleRequest(ctx: Context, next: Next) {
                         typeof KoboldProvider
                     >;
                     const quants: HfQuant[] = [];
-                    // todo: support already quantized models
-                    for await (
-                        const quantMeta of hfHub.listModels({
-                            search: {
-                                tags: ["base_model:quantized:" + req.model],
-                            },
-                        })
-                    ) {
-                        if (
-                            quantMeta.id.includes("exl2") ||
-                            quantMeta.id.includes("exl3")
-                        ) {
-                            continue;
-                        }
+                    try {
                         const files = await Array.fromAsync(
-                            hfHub.listFiles({ repo: quantMeta.id }),
+                            hfHub.listFiles({ repo: req.model }),
                         );
-                        let preferenceScore = 0;
-                        if (
-                            files.some((file) => file.path.includes("imatrix"))
-                        ) {
-                            preferenceScore +=
-                                koboldProvider.quantization.prefer_imatrix;
-                        }
-                        if (
-                            quantMeta.id.split("/")[0] ===
-                                modelFileName.split("/")[0]
-                        ) {
-                            preferenceScore +=
-                                koboldProvider.quantization.prefer_same_owner;
-                        }
+                        const basePreference = files.some((file) =>
+                                file.path.includes("imatrix")
+                            )
+                            ? koboldProvider.quantization.prefer_imatrix
+                            : 0;
                         for (const fileEntry of files) {
                             if (fileEntry.path.endsWith(".gguf")) {
+                                let preferenceScore = basePreference;
                                 const quantInfo = await getQuantizationType(
-                                    quantMeta.id,
+                                    req.model,
                                     fileEntry.path,
                                 );
                                 if (
@@ -250,17 +242,19 @@ async function handleRequest(ctx: Context, next: Next) {
                                         koboldProvider.quantization
                                             .prefer_correct_precision;
                                 }
-                                const entry = {
-                                    model: quantMeta,
+                                const entry: HfQuant = {
+                                    model: { id: req.model } as any,
                                     files,
                                     path: fileEntry.path,
-                                    preferenceScore: preferenceScore,
+                                    preferenceScore,
                                     quantInfo,
                                 };
                                 console.log("Quantization candidate", entry);
                                 quants.push(entry);
                             }
                         }
+                    } catch (err) {
+                        console.log("Error listing files for", req.model, err);
                     }
                     const bestQuantizations = (() => {
                         const maxPref = Math.max(
@@ -344,6 +338,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         memory: requiredMem,
                         port,
                     });
+                    await waitForPort(port);
                     config = {
                         api_base: `http://127.0.0.1:${port}`,
                         headers: {},
@@ -408,6 +403,7 @@ async function handleRequest(ctx: Context, next: Next) {
                 memory: requiredMem,
                 port,
             });
+            await waitForPort(port);
             config.api_base = `http://127.0.0.1:${port}`;
             await Deno.writeTextFile(modelFileName, toml.stringify(config));
         }
