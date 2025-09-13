@@ -1,4 +1,7 @@
-import { assert, assertEquals } from "@std/assert";
+import {
+    assert,
+    assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { securePath } from "./util.ts";
 
 Deno.test("securePath prevents directory traversal", () => {
