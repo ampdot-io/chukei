@@ -24,9 +24,9 @@ succeeds. For example, a typical run may include:
 
 1. Attempt to get the model from OpenRouter ✅
 2. Attempt to get the model from Featherless.ai ✅
-3. Attempt to use kobold.cpp to download and run the model locally 📋
+3. Attempt to use kobold.cpp to download and run the model locally ✅
 4. Attempt to run the model on Modal serverless GPUs 📋
-4. Send emails to contacts at inference partners to request support 📋
+5. Send emails to contacts at inference partners to request support 📋
 
 ## Roadmap
 - Multiple providers, failing over between them when one is unavailable
