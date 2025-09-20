@@ -50,6 +50,94 @@ async function waitForPort(port: number) {
 
 const specialFiles = new Set(["config.toml"]);
 
+type ModelWithMetadata = hfHub.ModelEntry & {
+    author?: string;
+    tags?: string[];
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function withExponentialBackoff<T>(
+    fn: () => Promise<T>,
+    options: { maxAttempts?: number; initialDelayMs?: number } = {},
+): Promise<T> {
+    const maxAttempts = options.maxAttempts ?? 5;
+    const initialDelayMs = options.initialDelayMs ?? 250;
+    let attempt = 0;
+    let lastError: unknown = null;
+    while (attempt < maxAttempts) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            if (
+                error instanceof hfHub.HubApiError &&
+                [401, 403, 404].includes(error.statusCode)
+            ) {
+                throw error;
+            }
+            attempt++;
+            if (attempt >= maxAttempts) {
+                throw error;
+            }
+            const delay = initialDelayMs * 2 ** (attempt - 1);
+            await sleep(delay);
+        }
+    }
+    throw lastError ?? new Error("Unknown error during backoff operation");
+}
+
+async function collectRepoFiles(
+    repoId: string,
+): Promise<hfHub.ListFileEntry[]> {
+    return await withExponentialBackoff(async () => {
+        const entries: hfHub.ListFileEntry[] = [];
+        for await (const entry of hfHub.listFiles({ repo: repoId })) {
+            entries.push(entry);
+        }
+        return entries;
+    });
+}
+
+async function mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let nextIndex = 0;
+    const workers = Array.from({
+        length: Math.max(1, Math.min(concurrency, items.length)),
+    }, () =>
+        (async () => {
+            while (true) {
+                const currentIndex = nextIndex++;
+                if (currentIndex >= items.length) break;
+                results[currentIndex] = await mapper(
+                    items[currentIndex],
+                    currentIndex,
+                );
+            }
+        })());
+    await Promise.all(workers);
+    return results;
+}
+
+function computeRepoPreference(
+    model: ModelWithMetadata,
+    quantPrefs: z.infer<typeof KoboldProvider>["quantization"],
+): number {
+    if (!quantPrefs.prefer_same_owner) return 0;
+    const [owner] = model.name?.split("/") ?? [];
+    if (
+        owner && model.author &&
+        owner.toLowerCase() === model.author.toLowerCase()
+    ) {
+        return quantPrefs.prefer_same_owner;
+    }
+    return 0;
+}
+
 router.get("/v1/models", async (ctx) => {
     await ensureModelsDir();
     const modelFiles = [];
@@ -94,7 +182,7 @@ const KoboldProvider = baseProviderSchema.extend({
         prefer_correct_precision: z.number().default(10000),
         prefer_imatrix: z.number().default(100),
         prefer_same_owner: z.number().default(10),
-        tiebreak_strategy: z.literal(["random", "popular"]),
+        tiebreak_strategy: z.enum(["random", "popular"]).default("random"),
     }),
 });
 
@@ -144,18 +232,150 @@ function computeHeaders(obj: Headerable): Record<string, string> {
 }
 
 interface HfQuant {
-    model: hfHub.ModelEntry;
-    files: hfHub.ListFileEntry[];
-    path: string;
+    model: ModelWithMetadata;
+    file: hfHub.ListFileEntry;
     preferenceScore: number;
     quantInfo: QuantInfo;
 }
 
-function betterQuantization(modelA: HfQuant, modelB: HfQuant) {
-    const hasIMatrix = (file: hfHub.ListFileEntry) =>
-        file.path.includes("imatrix");
-    modelA.files.some(hasIMatrix);
-    modelA.files.some(hasIMatrix);
+function chooseQuantization(
+    candidates: HfQuant[],
+    strategy: "random" | "popular",
+): HfQuant {
+    if (candidates.length === 1 || strategy === "random") {
+        return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+    const maxDownloads = Math.max(
+        ...candidates.map((candidate) => candidate.model.downloads ?? 0),
+    );
+    const mostPopular = candidates.filter((candidate) =>
+        (candidate.model.downloads ?? 0) === maxDownloads
+    );
+    return mostPopular[Math.floor(Math.random() * mostPopular.length)];
+}
+
+async function discoverQuantization(
+    modelId: string,
+    provider: z.infer<typeof KoboldProvider>,
+): Promise<HfQuant | null> {
+    const preferences = provider.quantization;
+    const seenRepos = new Set<string>();
+    const candidates: HfQuant[] = [];
+    let bestScore = -Infinity;
+    const maxPossibleScore = preferences.prefer_correct_precision +
+        preferences.prefer_imatrix +
+        preferences.prefer_same_owner;
+
+    const processRepo = async (model: ModelWithMetadata) => {
+        if (seenRepos.has(model.name)) return;
+        seenRepos.add(model.name);
+        let files: hfHub.ListFileEntry[];
+        try {
+            files = await collectRepoFiles(model.name);
+        } catch (error) {
+            if (error instanceof hfHub.HubApiError) {
+                if ([401, 403].includes(error.statusCode)) {
+                    console.log(
+                        `Skipping repo ${model.name} due to access restrictions`,
+                    );
+                    return;
+                }
+            }
+            console.log("Error listing files for", model.name, error);
+            return;
+        }
+        const ggufFiles = files.filter((file) =>
+            file.type === "file" && file.path.endsWith(".gguf")
+        );
+        if (ggufFiles.length === 0) {
+            return;
+        }
+        const repoPreference = computeRepoPreference(model, preferences);
+        const quantResults = await mapWithConcurrency(
+            ggufFiles,
+            4,
+            async (file) => {
+                let quantInfo: QuantInfo = {};
+                try {
+                    quantInfo = await withExponentialBackoff(() =>
+                        getQuantizationType(model.name, file.path)
+                    );
+                } catch (error) {
+                    console.log(
+                        `Failed to get quantization info for ${model.name}/${file.path}`,
+                        error,
+                    );
+                }
+                let score = repoPreference;
+                if (quantInfo.quantLevel === preferences.precision) {
+                    score += preferences.prefer_correct_precision;
+                }
+                if (file.path.toLowerCase().includes("imatrix")) {
+                    score += preferences.prefer_imatrix;
+                }
+                const candidate: HfQuant = {
+                    model,
+                    file,
+                    preferenceScore: score,
+                    quantInfo,
+                };
+                console.log(
+                    `Candidate quant ${model.name}/${file.path} @ ${candidate.quantInfo?.quantLevel} (preference score ${candidate.preferenceScore})`,
+                );
+                return candidate;
+            },
+        );
+        for (const candidate of quantResults) {
+            if (candidate.preferenceScore > bestScore) {
+                bestScore = candidate.preferenceScore;
+                candidates.splice(0, candidates.length, candidate);
+            } else if (candidate.preferenceScore === bestScore) {
+                candidates.push(candidate);
+            }
+        }
+    };
+
+    let baseModel: ModelWithMetadata | null = null;
+    try {
+        baseModel = await withExponentialBackoff(() =>
+            hfHub.modelInfo({
+                name: modelId,
+                additionalFields: ["author", "tags"],
+            })
+        );
+    } catch (error) {
+        console.log("Unable to fetch model info for", modelId, error);
+    }
+    if (baseModel) {
+        await processRepo(baseModel);
+        if (bestScore >= maxPossibleScore && candidates.length > 0) {
+            return chooseQuantization(
+                candidates,
+                preferences.tiebreak_strategy,
+            );
+        }
+    }
+
+    const quantTag = `base_model:quantized:${modelId}`;
+    try {
+        for await (
+            const repo of hfHub.listModels({
+                search: { tags: [quantTag, "gguf"] },
+                additionalFields: ["author", "tags"],
+                limit: 100,
+            })
+        ) {
+            await processRepo(repo as ModelWithMetadata);
+            if (bestScore >= maxPossibleScore && candidates.length > 0) {
+                break;
+            }
+        }
+    } catch (error) {
+        console.log("Error searching for quantized repos for", modelId, error);
+    }
+
+    if (candidates.length === 0) return null;
+    return chooseQuantization(candidates, preferences.tiebreak_strategy);
 }
 
 async function handleRequest(ctx: Context, next: Next) {
@@ -220,81 +440,32 @@ async function handleRequest(ctx: Context, next: Next) {
                     const koboldProvider = provider as unknown as z.infer<
                         typeof KoboldProvider
                     >;
-                    const quants: HfQuant[] = [];
+                    let selectedQuantization: HfQuant | null = null;
                     try {
-                        const files = await Array.fromAsync(
-                            hfHub.listFiles({ repo: req.model }),
+                        selectedQuantization = await discoverQuantization(
+                            req.model,
+                            koboldProvider,
                         );
-                        const basePreference = files.some((file) =>
-                                file.path.includes("imatrix")
-                            )
-                            ? koboldProvider.quantization.prefer_imatrix
-                            : 0;
-                        for (const fileEntry of files) {
-                            if (fileEntry.path.endsWith(".gguf")) {
-                                let preferenceScore = basePreference;
-                                const quantInfo = await getQuantizationType(
-                                    req.model,
-                                    fileEntry.path,
-                                );
-                                if (
-                                    quantInfo?.quantLevel ===
-                                        koboldProvider.quantization.precision
-                                ) {
-                                    preferenceScore +=
-                                        koboldProvider.quantization
-                                            .prefer_correct_precision;
-                                }
-                                const entry: HfQuant = {
-                                    model: { id: req.model } as any,
-                                    files,
-                                    path: fileEntry.path,
-                                    preferenceScore,
-                                    quantInfo,
-                                };
-                                console.log(
-                                    `Candidate quant ${entry.path} @ ${entry.quantInfo?.quantLevel} (preference score ${entry.preferenceScore})`,
-                                );
-                                quants.push(entry);
-                            }
-                        }
-                    } catch (err) {
-                        console.log("Error listing files for", req.model, err);
+                    } catch (error) {
+                        console.log(
+                            "Error discovering quantization for",
+                            req.model,
+                            error,
+                        );
                     }
-                    if (quants.length === 0) {
-                        console.log("No quantizations found in", req.model);
-                    }
-                    const bestQuantizations = (() => {
-                        const maxPref = Math.max(
-                            ...quants.map((quant) => quant.preferenceScore),
-                        );
-                        return quants.filter((quant) =>
-                            quant.preferenceScore === maxPref
-                        );
-                    })();
-                    let selectedQuantization;
-                    if (
-                        koboldProvider.quantization.tiebreak_strategy ===
-                            "random"
-                    ) {
-                        selectedQuantization = bestQuantizations[
-                            Math.floor(
-                                Math.random() * bestQuantizations.length,
-                            )
-                        ];
-                    } else {
-                        selectedQuantization = bestQuantizations[0];
+                    if (!selectedQuantization) {
+                        console.log("No quantizations found for", req.model);
+                        continue;
                     }
                     console.log("Selected quantization", {
-                        path: selectedQuantization.path,
+                        repo: selectedQuantization.model.name,
+                        path: selectedQuantization.file.path,
                         preferenceScore: selectedQuantization.preferenceScore,
                         quantLevel: selectedQuantization.quantInfo?.quantLevel,
                     });
 
                     await ensureModelsPath();
-                    const fileEntry = selectedQuantization.files.find((f) =>
-                        f.path === selectedQuantization.path
-                    );
+                    const fileEntry = selectedQuantization.file;
                     const requiredMem = fileEntry?.size ?? 0;
                     let available = Deno.systemMemoryInfo().available;
                     if (requiredMem > available) {
@@ -312,13 +483,13 @@ async function handleRequest(ctx: Context, next: Next) {
                     }
                     const modelsPath = os.homedir() + "/models";
                     const repoDir = modelsPath + "/" +
-                        selectedQuantization.model.id;
+                        selectedQuantization.model.name;
                     await Deno.mkdir(repoDir, { recursive: true });
                     const localModelPath = repoDir + "/" +
-                        selectedQuantization.path.split("/").pop();
+                        selectedQuantization.file.path.split("/").pop();
                     if (!await fileExists(localModelPath)) {
                         const downloadUrl =
-                            `https://huggingface.co/${selectedQuantization.model.id}/resolve/main/${selectedQuantization.path}`;
+                            `https://huggingface.co/${selectedQuantization.model.name}/resolve/main/${selectedQuantization.file.path}`;
                         console.log("Downloading model", downloadUrl);
                         const res = await fetch(downloadUrl);
                         if (!res.ok || !res.body) {
