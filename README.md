@@ -17,6 +17,7 @@ suffix.
 ## New features compared to conduit
 - Streaming completions
 - TOML configuration
+- Chat completions support (`/v1/chat/completions`)
 
 ## Algorithm
 The agent attempts multiple strategies, keeping the connection open until one

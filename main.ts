@@ -436,7 +436,6 @@ async function handleRequest(ctx: Context, next: Next) {
 }
 
 router.post("/v1/completions", handleRequest);
-// this will be supported eventually but isn't a priority
 router.post("/v1/chat/completions", handleRequest);
 
 const app = new Application();
