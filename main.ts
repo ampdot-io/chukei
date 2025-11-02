@@ -94,7 +94,7 @@ const KoboldProvider = baseProviderSchema.extend({
         prefer_correct_precision: z.number().default(10000),
         prefer_imatrix: z.number().default(100),
         prefer_same_owner: z.number().default(10),
-        tiebreak_strategy: z.literal(["random", "popular"]),
+        tiebreak_strategy: z.enum(["random", "popular"]),
     }),
 });
 
