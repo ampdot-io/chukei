@@ -151,13 +151,6 @@ interface HfQuant {
     quantInfo: QuantInfo;
 }
 
-function betterQuantization(modelA: HfQuant, modelB: HfQuant) {
-    const hasIMatrix = (file: hfHub.ListFileEntry) =>
-        file.path.includes("imatrix");
-    modelA.files.some(hasIMatrix);
-    modelA.files.some(hasIMatrix);
-}
-
 async function handleRequest(ctx: Context, next: Next) {
     let globalConfig, req, config, originalBody;
     try {
