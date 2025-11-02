@@ -15,6 +15,10 @@ import { exists as fileExists } from "https://deno.land/std@0.224.0/fs/exists.ts
 import { dirname } from "node:path";
 import * as hfHub from "https://esm.sh/@huggingface/hub";
 
+const knownQuantizations: string[] = JSON.parse(
+    await Deno.readTextFile("./knownQuantizations.json"),
+);
+
 const router = new Router();
 
 // Track running koboldcpp processes so we can manage memory
@@ -49,6 +53,87 @@ async function waitForPort(port: number) {
         }
     }
     throw new Error(`Timeout waiting for port ${port}`);
+}
+
+function parseModelNameWithQuantization(modelName: string): {
+    baseModel: string;
+    quantization: string | null;
+} {
+    // Try to find quantization suffix in the model name
+    // Patterns: "model-Q5_K_M", "model_Q5_K_M", "model-GGUF-Q5_K_M"
+    for (const quant of knownQuantizations) {
+        // Try with different separators and patterns
+        const patterns = [
+            `-${quant}`, // e.g., "model-Q5_K_M"
+            `_${quant}`, // e.g., "model_Q5_K_M"
+            `-${quant.replace(/_/g, "-")}`, // e.g., "model-Q5-K-M"
+        ];
+
+        for (const pattern of patterns) {
+            if (modelName.endsWith(pattern)) {
+                return {
+                    baseModel: modelName.slice(0, -pattern.length),
+                    quantization: quant,
+                };
+            }
+        }
+    }
+
+    return { baseModel: modelName, quantization: null };
+}
+
+async function findQuantizationRepos(
+    baseModelName: string,
+): Promise<string[]> {
+    const repos: string[] = [];
+
+    try {
+        // Primary approach: use HuggingFace's base_model tagging system
+        const results = await Array.fromAsync(
+            hfHub.listModels({
+                tags: [`base_model:quantized:${baseModelName}`],
+            }),
+        );
+
+        for (const model of results) {
+            const repoName = model.id || model.name;
+            if (repoName && !repos.includes(repoName)) {
+                repos.push(repoName);
+            }
+        }
+
+        // Fallback: search if no tagged repos found
+        if (repos.length === 0) {
+            console.log(`No tagged quantization repos found for ${baseModelName}, falling back to search`);
+            const parts = baseModelName.split("/");
+            const modelNameOnly = parts[parts.length - 1];
+
+            const searchTerms = [
+                `${modelNameOnly} GGUF`,
+                `${modelNameOnly}-GGUF`,
+            ];
+
+            for (const term of searchTerms) {
+                const searchResults = await Array.fromAsync(
+                    hfHub.listModels({
+                        search: { query: term },
+                        limit: 20,
+                    }),
+                );
+
+                for (const model of searchResults) {
+                    const repoName = model.id || model.name;
+                    if (repoName && !repos.includes(repoName)) {
+                        repos.push(repoName);
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.log("Error finding quantization repos:", err);
+    }
+
+    return repos;
 }
 
 async function downloadModelFile(
@@ -310,44 +395,77 @@ async function handleRequest(ctx: Context, next: Next) {
                         typeof KoboldProvider
                     >;
                     const quants: HfQuant[] = [];
-                    try {
-                        const files = await Array.fromAsync(
-                            hfHub.listFiles({ repo: req.model }),
-                        );
-                        const basePreference = files.some((file) =>
-                                file.path.includes("imatrix")
-                            )
-                            ? koboldProvider.quantization.prefer_imatrix
-                            : 0;
-                        for (const fileEntry of files) {
-                            if (fileEntry.path.endsWith(".gguf")) {
-                                let preferenceScore = basePreference;
-                                const quantInfo = await getQuantizationType(
-                                    req.model,
-                                    fileEntry.path,
-                                );
-                                if (
-                                    quantInfo?.quantLevel ===
-                                        koboldProvider.quantization.precision
-                                ) {
-                                    preferenceScore +=
-                                        koboldProvider.quantization
-                                            .prefer_correct_precision;
-                                }
-                                const entry: HfQuant = {
-                                    model: { id: req.model } as any,
-                                    files,
-                                    path: fileEntry.path,
-                                    preferenceScore,
-                                    quantInfo,
-                                };
-                                console.log("Quantization candidate", entry);
-                                quants.push(entry);
-                            }
-                        }
-                    } catch (err) {
-                        console.log("Error listing files for", req.model, err);
+
+                    // Parse model name to check for quantization suffix
+                    const { baseModel, quantization: requestedQuant } =
+                        parseModelNameWithQuantization(req.model);
+
+                    let reposToSearch: string[] = [];
+
+                    if (requestedQuant) {
+                        // User requested specific quantization, find quantization repos
+                        console.log(`Searching for ${requestedQuant} quantization of ${baseModel}`);
+                        reposToSearch = await findQuantizationRepos(baseModel);
+                        // Also try the base model repo itself as fallback
+                        reposToSearch.push(baseModel);
+                    } else {
+                        // No quantization suffix, search the model repo directly
+                        reposToSearch = [req.model];
                     }
+
+                    // Search all candidate repos for GGUF files
+                    for (const repo of reposToSearch) {
+                        try {
+                            console.log(`Checking repo: ${repo}`);
+                            const files = await Array.fromAsync(
+                                hfHub.listFiles({ repo }),
+                            );
+                            const basePreference = files.some((file) =>
+                                    file.path.includes("imatrix")
+                                )
+                                ? koboldProvider.quantization.prefer_imatrix
+                                : 0;
+                            for (const fileEntry of files) {
+                                if (fileEntry.path.endsWith(".gguf")) {
+                                    let preferenceScore = basePreference;
+                                    const quantInfo = await getQuantizationType(
+                                        repo,
+                                        fileEntry.path,
+                                    );
+
+                                    // If user requested specific quantization, heavily prefer it
+                                    if (requestedQuant && quantInfo?.quantLevel === requestedQuant) {
+                                        preferenceScore += 100000;
+                                    } else if (
+                                        quantInfo?.quantLevel ===
+                                            koboldProvider.quantization.precision
+                                    ) {
+                                        preferenceScore +=
+                                            koboldProvider.quantization
+                                                .prefer_correct_precision;
+                                    }
+
+                                    const entry: HfQuant = {
+                                        model: { id: repo } as any,
+                                        files,
+                                        path: fileEntry.path,
+                                        preferenceScore,
+                                        quantInfo,
+                                    };
+                                    console.log("Quantization candidate", entry);
+                                    quants.push(entry);
+                                }
+                            }
+                        } catch (err) {
+                            console.log("Error listing files for", repo, err);
+                        }
+                    }
+
+                    if (quants.length === 0) {
+                        console.log("No GGUF files found in any repos");
+                        continue;
+                    }
+
                     const bestQuantizations = (() => {
                         const maxPref = Math.max(
                             ...quants.map((quant) => quant.preferenceScore),
