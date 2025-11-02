@@ -51,6 +51,102 @@ async function waitForPort(port: number) {
     throw new Error(`Timeout waiting for port ${port}`);
 }
 
+async function downloadModelFile(
+    url: string,
+    localPath: string,
+    expectedSize: number,
+    expectedSha256?: string,
+): Promise<void> {
+    // Check if file exists and validate size
+    let existingSize = 0;
+    try {
+        const stat = await Deno.stat(localPath);
+        existingSize = stat.size;
+
+        if (existingSize === expectedSize) {
+            // File exists with correct size, validate hash if provided
+            if (expectedSha256) {
+                console.log("Validating existing file hash...");
+                const file = await Deno.open(localPath, { read: true });
+                const hash = await crypto.subtle.digest("SHA-256", file.readable);
+                file.close();
+                const hashHex = Array.from(new Uint8Array(hash))
+                    .map(b => b.toString(16).padStart(2, "0"))
+                    .join("");
+                if (hashHex === expectedSha256) {
+                    console.log("File already downloaded and validated");
+                    return;
+                } else {
+                    console.log("Hash mismatch, re-downloading");
+                    existingSize = 0; // Force full download
+                }
+            } else {
+                console.log("File already downloaded (size match, no hash validation)");
+                return;
+            }
+        } else if (existingSize > expectedSize) {
+            console.log("File is larger than expected, re-downloading");
+            existingSize = 0;
+        } else if (existingSize > 0) {
+            console.log(`Resuming download from byte ${existingSize}/${expectedSize}`);
+        }
+    } catch (err) {
+        if (!(err instanceof Deno.errors.NotFound)) {
+            throw err;
+        }
+    }
+
+    // Download or resume download
+    const headers: Record<string, string> = {};
+    if (existingSize > 0) {
+        headers["Range"] = `bytes=${existingSize}-`;
+    }
+
+    console.log(`Downloading model: ${url}`);
+    const res = await fetch(url, { headers });
+
+    if (!res.ok || !res.body) {
+        throw new Error(`Failed to download model: ${res.status} ${res.statusText}`);
+    }
+
+    // Check if server supports resume
+    const isResume = existingSize > 0 && res.status === 206;
+
+    const file = await Deno.open(localPath, {
+        create: true,
+        write: true,
+        truncate: !isResume, // Only truncate if not resuming
+        append: isResume,
+    });
+
+    await res.body.pipeTo(file.writable);
+
+    // Validate final file size
+    const finalStat = await Deno.stat(localPath);
+    if (finalStat.size !== expectedSize) {
+        throw new Error(
+            `Downloaded file size mismatch: expected ${expectedSize}, got ${finalStat.size}`,
+        );
+    }
+
+    // Validate hash if provided
+    if (expectedSha256) {
+        console.log("Validating downloaded file hash...");
+        const file = await Deno.open(localPath, { read: true });
+        const hash = await crypto.subtle.digest("SHA-256", file.readable);
+        file.close();
+        const hashHex = Array.from(new Uint8Array(hash))
+            .map(b => b.toString(16).padStart(2, "0"))
+            .join("");
+        if (hashHex !== expectedSha256) {
+            throw new Error(
+                `Downloaded file hash mismatch: expected ${expectedSha256}, got ${hashHex}`,
+            );
+        }
+        console.log("Hash validated successfully");
+    }
+}
+
 const specialFiles = new Set(["config.toml"]);
 
 router.get("/v1/models", async (ctx) => {
@@ -297,21 +393,15 @@ async function handleRequest(ctx: Context, next: Next) {
                     const modelsPath = os.homedir() + "/models";
                     const localModelPath = modelsPath + "/" +
                         selectedQuantization.path.split("/").pop();
-                    if (!await fileExists(localModelPath)) {
-                        const downloadUrl =
-                            `https://huggingface.co/${selectedQuantization.model.id}/resolve/main/${selectedQuantization.path}`;
-                        console.log("Downloading model", downloadUrl);
-                        const res = await fetch(downloadUrl);
-                        if (!res.ok || !res.body) {
-                            throw new Error("Failed to download model");
-                        }
-                        const file = await Deno.open(localModelPath, {
-                            create: true,
-                            write: true,
-                            truncate: true,
-                        });
-                        await res.body.pipeTo(file.writable);
-                    }
+                    const downloadUrl =
+                        `https://huggingface.co/${selectedQuantization.model.id}/resolve/main/${selectedQuantization.path}`;
+                    const sha256 = (fileEntry as any)?.lfs?.sha256;
+                    await downloadModelFile(
+                        downloadUrl,
+                        localModelPath,
+                        fileEntry?.size ?? 0,
+                        sha256,
+                    );
 
                     const port = nextAvailablePort++;
                     const command = new Deno.Command(
