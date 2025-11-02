@@ -23,6 +23,9 @@ const runningModels = new Map<
     { proc: Deno.ChildProcess; lastUsed: number; memory: number; port: number }
 >();
 
+// Track next available port to avoid conflicts when processes are killed
+let nextAvailablePort = 55000;
+
 async function ensureModelsPath() {
     await Deno.mkdir(os.homedir() + "/models", { recursive: true });
 }
@@ -310,7 +313,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         await res.body.pipeTo(file.writable);
                     }
 
-                    const port = 55000 + runningModels.size;
+                    const port = nextAvailablePort++;
                     const command = new Deno.Command(
                         koboldProvider.kobold_path,
                         {
@@ -378,7 +381,7 @@ async function handleRequest(ctx: Context, next: Next) {
                     if (requiredMem <= available) break;
                 }
             }
-            const port = 55000 + runningModels.size;
+            const port = nextAvailablePort++;
             const command = new Deno.Command(config.kobold_path, {
                 args: [
                     "--multiuser",
