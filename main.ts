@@ -136,6 +136,128 @@ async function findQuantizationRepos(
     return repos;
 }
 
+function getKoboldcppBinaryInfo(): {
+    assetPattern: RegExp;
+    binaryName: string;
+} {
+    const platform = Deno.build.os;
+    const arch = Deno.build.arch;
+
+    // Determine binary pattern based on platform
+    // koboldcpp releases typically have names like:
+    // - koboldcpp-linux-x64
+    // - koboldcpp-linux-x64-cuda1150
+    // - koboldcpp.exe (Windows)
+    // - koboldcpp-mac-x64
+    if (platform === "linux") {
+        // Prefer non-GPU version for compatibility
+        return {
+            assetPattern: /koboldcpp-linux-x64$/,
+            binaryName: "koboldcpp",
+        };
+    } else if (platform === "darwin") {
+        return {
+            assetPattern: /koboldcpp-mac-x64/,
+            binaryName: "koboldcpp",
+        };
+    } else if (platform === "windows") {
+        return {
+            assetPattern: /koboldcpp\.exe$/,
+            binaryName: "koboldcpp.exe",
+        };
+    }
+
+    throw new Error(`Unsupported platform: ${platform}`);
+}
+
+async function ensureKoboldcpp(providedPath?: string): Promise<string> {
+    // If path provided, validate and return it
+    if (providedPath) {
+        try {
+            await Deno.stat(providedPath);
+            return providedPath;
+        } catch {
+            throw new Error(`Provided kobold_path does not exist: ${providedPath}`);
+        }
+    }
+
+    // Check if we already downloaded koboldcpp
+    const binDir = getConfigPath() + "/bin";
+    await Deno.mkdir(binDir, { recursive: true });
+
+    const { binaryName } = getKoboldcppBinaryInfo();
+    const koboldPath = `${binDir}/${binaryName}`;
+
+    try {
+        await Deno.stat(koboldPath);
+        console.log("Using cached koboldcpp binary");
+        return koboldPath;
+    } catch {
+        // Need to download
+        console.log("Downloading koboldcpp from GitHub releases...");
+        await downloadKoboldcpp(koboldPath);
+        return koboldPath;
+    }
+}
+
+async function downloadKoboldcpp(targetPath: string): Promise<void> {
+    const { assetPattern } = getKoboldcppBinaryInfo();
+
+    // Fetch latest release info
+    const releaseResponse = await fetch(
+        "https://api.github.com/repos/LostRuins/koboldcpp/releases/latest",
+        {
+            headers: {
+                "User-Agent": "chukei",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        },
+    );
+
+    if (!releaseResponse.ok) {
+        throw new Error(
+            `Failed to fetch koboldcpp releases: ${releaseResponse.status}`,
+        );
+    }
+
+    const release = await releaseResponse.json();
+    const assets = release.assets || [];
+
+    // Find matching asset
+    const asset = assets.find((a: any) => assetPattern.test(a.name));
+
+    if (!asset) {
+        throw new Error(
+            `Could not find koboldcpp binary for platform. Available assets: ${
+                assets.map((a: any) => a.name).join(", ")
+            }`,
+        );
+    }
+
+    console.log(`Downloading ${asset.name} from ${asset.browser_download_url}`);
+
+    // Download the binary
+    const binaryResponse = await fetch(asset.browser_download_url);
+    if (!binaryResponse.ok || !binaryResponse.body) {
+        throw new Error(`Failed to download koboldcpp: ${binaryResponse.status}`);
+    }
+
+    const file = await Deno.open(targetPath, {
+        create: true,
+        write: true,
+        truncate: true,
+    });
+
+    await binaryResponse.body.pipeTo(file.writable);
+
+    // Make executable on Unix-like systems
+    if (Deno.build.os !== "windows") {
+        await Deno.chmod(targetPath, 0o755);
+    }
+
+    console.log("koboldcpp downloaded successfully");
+}
+
 async function downloadModelFile(
     url: string,
     localPath: string,
@@ -272,7 +394,7 @@ const baseProviderSchema = configSchema.omit({ provider: true }).required({
 
 const KoboldProvider = baseProviderSchema.extend({
     discovery_type: z.literal("koboldcpp"),
-    kobold_path: z.string(),
+    kobold_path: z.string().optional(),
     quantization: z.object({
         precision: z.string().default("Q5_K_M"),
         prefer_correct_precision: z.number().default(10000),
@@ -521,9 +643,11 @@ async function handleRequest(ctx: Context, next: Next) {
                         sha256,
                     );
 
+                    const koboldPath = await ensureKoboldcpp(koboldProvider.kobold_path);
+
                     const port = nextAvailablePort++;
                     const command = new Deno.Command(
-                        koboldProvider.kobold_path,
+                        koboldPath,
                         {
                             args: [
                                 "--multiuser",
@@ -547,7 +671,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         api_base: `http://127.0.0.1:${port}`,
                         headers: {},
                         body: {},
-                        kobold_path: koboldProvider.kobold_path,
+                        kobold_path: koboldPath,
                         model_path: localModelPath,
                     };
                 }
@@ -571,7 +695,6 @@ async function handleRequest(ctx: Context, next: Next) {
         );
         if (
             !runningModels.has(req.model) &&
-            config.kobold_path &&
             config.model_path
         ) {
             const stat = await Deno.stat(config.model_path).catch(() => null);
@@ -589,8 +712,11 @@ async function handleRequest(ctx: Context, next: Next) {
                     if (requiredMem <= available) break;
                 }
             }
+
+            const koboldPath = await ensureKoboldcpp(config.kobold_path);
+
             const port = nextAvailablePort++;
-            const command = new Deno.Command(config.kobold_path, {
+            const command = new Deno.Command(koboldPath, {
                 args: [
                     "--multiuser",
                     "--skiplauncher",
@@ -609,6 +735,7 @@ async function handleRequest(ctx: Context, next: Next) {
             });
             await waitForPort(port);
             config.api_base = `http://127.0.0.1:${port}`;
+            config.kobold_path = koboldPath;
             await Deno.writeTextFile(modelFileName, toml.stringify(config));
         }
     } catch (error) {

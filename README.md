@@ -11,8 +11,11 @@ user requests a language model that it lacks a configuration for, instead of
 returning 404 Not Found, it **agentically auto-configures itself**.
 
 **Author's note:** The current version is intended primarily for open-source
-models, and as such, only supports HuggingFace model IDs with a quantization
-suffix.
+models, and as such, primarily supports HuggingFace model IDs. When requesting
+models from the koboldcpp provider, you can optionally append a quantization
+suffix (e.g., `mistralai/Mistral-7B-Instruct-v0.3-Q5_K_M`) to request a specific
+quantization. Chukei will automatically find quantized versions of the base model
+using HuggingFace's tagging system.
 
 ## New features compared to conduit
 - Streaming completions
@@ -41,9 +44,19 @@ The root configuration file is config.toml, where you can configure providers:
 [providers.openrouter]
 api_base = "https://openrouter.ai/api"
 api_key = "sk-or-v1-myapikey"
+
+[providers.kobold]
+discovery_type = "koboldcpp"
+# kobold_path is optional - if not provided, chukei will automatically
+# download koboldcpp from GitHub releases on first use
+# kobold_path = "/path/to/koboldcpp"
 ```
 
 Do **not** include `/v1` or `/completions` in the `api_base`.
+
+The koboldcpp provider will automatically download models from HuggingFace and
+run them locally. If `kobold_path` is not specified, chukei will automatically
+download the latest koboldcpp binary from GitHub releases.
 
 Model-specific configurations are also stored in this directory. This format
 is undocumented and expected to change.
