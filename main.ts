@@ -48,6 +48,159 @@ async function waitForPort(port: number) {
     throw new Error(`Timeout waiting for port ${port}`);
 }
 
+function getPidPath(port: number) {
+    return `${getConfigPath()}/pids/${port}.pid`;
+}
+
+async function ensurePidsDir() {
+    await Deno.mkdir(getConfigPath() + "/pids", { recursive: true });
+}
+
+async function writePid(port: number, pid: number) {
+    await ensurePidsDir();
+    await Deno.writeTextFile(getPidPath(port), pid.toString());
+}
+
+async function deletePid(port: number) {
+    try {
+        await Deno.remove(getPidPath(port));
+    } catch {
+        // ignore
+    }
+}
+
+async function isPortOpen(port: number): Promise<boolean> {
+    try {
+        const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+        conn.close();
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function cleanupZombieOnPort(port: number) {
+    const pidPath = getPidPath(port);
+    try {
+        const content = await Deno.readTextFile(pidPath);
+        const pid = parseInt(content);
+        if (!isNaN(pid)) {
+            const portOpen = await isPortOpen(port);
+            if (!portOpen) {
+                await deletePid(port);
+                return;
+            }
+
+            let isZombie = false;
+            if (Deno.build.os === "linux") {
+                try {
+                    const cmdline = await Deno.readTextFile(`/proc/${pid}/cmdline`);
+                    if (cmdline.includes("kobold")) isZombie = true;
+                } catch {
+                    // ignore
+                }
+            }
+
+            if (isZombie) {
+                try {
+                    console.log(`Cleaning up zombie process ${pid} on port ${port}`);
+                    Deno.kill(pid, "SIGKILL");
+                } catch (e) {
+                    // ignore
+                }
+            } else {
+                console.log(`Port ${port} is open but process ${pid} verification failed. Not killing.`);
+            }
+        }
+        await deletePid(port);
+    } catch {
+        // ignore
+    }
+}
+
+function getNextFreePort(): number {
+    let port = 55000;
+    while (true) {
+        let inUse = false;
+        for (const info of runningModels.values()) {
+            if (info.port === port) {
+                inUse = true;
+                break;
+            }
+        }
+        if (!inUse) return port;
+        port++;
+    }
+}
+
+async function freeMemory(requiredMem: number) {
+    let available = Deno.systemMemoryInfo().available;
+    if (requiredMem > available) {
+        const entries = [...runningModels.entries()].sort((
+            a,
+            b,
+        ) => a[1].lastUsed - b[1].lastUsed);
+        for (const [modelName, info] of entries) {
+            console.log("Killing LRU process", modelName);
+            try { info.proc.kill("SIGKILL"); } catch {}
+            runningModels.delete(modelName);
+            await deletePid(info.port);
+            available = Deno.systemMemoryInfo().available;
+            if (requiredMem <= available) break;
+        }
+    }
+}
+
+async function startKoboldProcess(
+    koboldPath: string,
+    modelPath: string,
+    reqModelId: string,
+    requiredMem: number
+): Promise<{ port: number }> {
+    await freeMemory(requiredMem);
+
+    const port = getNextFreePort();
+    await cleanupZombieOnPort(port);
+
+    const command = new Deno.Command(koboldPath, {
+        args: [
+            "--multiuser",
+            "--skiplauncher",
+            "--port",
+            String(port),
+            "--model",
+            modelPath,
+        ],
+        stderr: "piped",
+    });
+    const proc = command.spawn();
+
+    const stderrPath = `${getConfigPath()}/koboldcpp.${proc.pid}.stderr`;
+    try {
+        const stderrFile = await Deno.open(stderrPath, {
+            create: true,
+            write: true,
+            truncate: true,
+        });
+        proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
+            console.error("Failed to pipe koboldcpp stderr", err)
+        );
+    } catch (e) {
+        console.error("Failed to open stderr log", e);
+    }
+
+    await writePid(port, proc.pid);
+
+    runningModels.set(reqModelId, {
+        proc,
+        lastUsed: Date.now(),
+        memory: requiredMem,
+        port,
+    });
+    await waitForPort(port);
+    return { port };
+}
+
 const specialFiles = new Set(["config.toml"]);
 
 router.get("/v1/models", async (ctx) => {
@@ -296,20 +449,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         f.path === selectedQuantization.path
                     );
                     const requiredMem = fileEntry?.size ?? 0;
-                    let available = Deno.systemMemoryInfo().available;
-                    if (requiredMem > available) {
-                        const entries = [...runningModels.entries()].sort((
-                            a,
-                            b,
-                        ) => a[1].lastUsed - b[1].lastUsed);
-                        for (const [modelName, info] of entries) {
-                            console.log("Killing LRU process", modelName);
-                            info.proc.kill("SIGKILL");
-                            runningModels.delete(modelName);
-                            available = Deno.systemMemoryInfo().available;
-                            if (requiredMem <= available) break;
-                        }
-                    }
+
                     const modelsPath = os.homedir() + "/models";
                     const repoDir = modelsPath + "/" +
                         selectedQuantization.model.id;
@@ -332,28 +472,13 @@ async function handleRequest(ctx: Context, next: Next) {
                         await res.body.pipeTo(file.writable);
                     }
 
-                    const port = 55000 + runningModels.size;
-                    const command = new Deno.Command(
+                    const { port } = await startKoboldProcess(
                         koboldProvider.kobold_path,
-                        {
-                            args: [
-                                "--multiuser",
-                                "--skiplauncher",
-                                "--port",
-                                String(port),
-                                "--model",
-                                localModelPath,
-                            ],
-                        },
+                        localModelPath,
+                        req.model,
+                        requiredMem
                     );
-                    const proc = command.spawn();
-                    runningModels.set(req.model, {
-                        proc,
-                        lastUsed: Date.now(),
-                        memory: requiredMem,
-                        port,
-                    });
-                    await waitForPort(port);
+
                     config = {
                         api_base: `http://127.0.0.1:${port}`,
                         headers: {},
@@ -390,49 +515,14 @@ async function handleRequest(ctx: Context, next: Next) {
         ) {
             const stat = await Deno.stat(config.model_path).catch(() => null);
             const requiredMem = stat?.size ?? 0;
-            let available = Deno.systemMemoryInfo().available;
-            if (requiredMem > available) {
-                const entries = [...runningModels.entries()].sort((a, b) =>
-                    a[1].lastUsed - b[1].lastUsed
-                );
-                for (const [modelName, info] of entries) {
-                    console.log("Killing LRU process", modelName);
-                    info.proc.kill("SIGKILL");
-                    runningModels.delete(modelName);
-                    available = Deno.systemMemoryInfo().available;
-                    if (requiredMem <= available) break;
-                }
-            }
-            const port = 55000 + runningModels.size;
-            const command = new Deno.Command(config.kobold_path, {
-                args: [
-                    "--multiuser",
-                    "--skiplauncher",
-                    "--port",
-                    String(port),
-                    "--model",
-                    config.model_path,
-                ],
-                stderr: "piped",
-            });
-            const proc = command.spawn();
-            const stderrPath =
-                `${getConfigPath()}/koboldcpp.${proc.pid}.stderr`;
-            const stderrFile = await Deno.open(stderrPath, {
-                create: true,
-                write: true,
-                truncate: true,
-            });
-            proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
-                console.error("Failed to pipe koboldcpp stderr", err)
+
+            const { port } = await startKoboldProcess(
+                config.kobold_path,
+                config.model_path,
+                req.model,
+                requiredMem
             );
-            runningModels.set(req.model, {
-                proc,
-                lastUsed: Date.now(),
-                memory: requiredMem,
-                port,
-            });
-            await waitForPort(port);
+
             config.api_base = `http://127.0.0.1:${port}`;
             await Deno.writeTextFile(modelFileName, toml.stringify(config));
         }
@@ -452,10 +542,11 @@ async function handleRequest(ctx: Context, next: Next) {
             ctx.response.body = {
                 error: {
                     message: "Internal server error",
-                    stack: error.stack,
+                    stack: (error as any).stack,
                     code: 500,
                 },
             };
+            return;
         }
     }
     if (config.provider != null) {
