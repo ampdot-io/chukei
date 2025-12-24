@@ -185,7 +185,7 @@ async function handleRequest(ctx: Context, next: Next) {
                 let models;
                 if (provider.discovery_type === "openai_models_list") {
                     try {
-                        console.log(`Checking /v1/models for: ${providerName}`);
+                        console.log(`▶️ Checking /v1/models for: ${providerName}`);
                         const fetchRes = await fetch(
                             provider.api_base + "/v1/models",
                             { headers: computeHeaders(provider) },
@@ -200,7 +200,7 @@ async function handleRequest(ctx: Context, next: Next) {
                                     req.model.toLowerCase()
                             ) {
                                 console.log(
-                                    `Found ${req.model} on ${providerName}!`,
+                                    `✅ Found ${req.model} on ${providerName}!`,
                                 );
                                 config = {
                                     provider: providerName,
@@ -211,7 +211,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         }
                     } catch (error) {
                         console.log(
-                            `Encountered error: ${providerName}`,
+                            `⚠️ Encountered error: ${providerName}`,
                             req.model,
                             error,
                         );
@@ -253,16 +253,16 @@ async function handleRequest(ctx: Context, next: Next) {
                                     quantInfo,
                                 };
                                 console.log(
-                                    `Candidate quant ${entry.path} @ ${entry.quantInfo?.quantLevel} (preference score ${entry.preferenceScore})`,
+                                    `ℹ️ Candidate quant ${entry.path} @ ${entry.quantInfo?.quantLevel} (preference score ${entry.preferenceScore})`,
                                 );
                                 quants.push(entry);
                             }
                         }
                     } catch (err) {
-                        console.log("Error listing files for", req.model, err);
+                        console.log("⚠️ Error listing files for", req.model, err);
                     }
                     if (quants.length === 0) {
-                        console.log("No quantizations found in", req.model);
+                        console.log("↩️ No quantizations found in", req.model);
                     }
                     const bestQuantizations = (() => {
                         const maxPref = Math.max(
@@ -285,7 +285,7 @@ async function handleRequest(ctx: Context, next: Next) {
                     } else {
                         selectedQuantization = bestQuantizations[0];
                     }
-                    console.log("Selected quantization", {
+                    console.log("▶️ Selected quantization", {
                         path: selectedQuantization.path,
                         preferenceScore: selectedQuantization.preferenceScore,
                         quantLevel: selectedQuantization.quantInfo?.quantLevel,
