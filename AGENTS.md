@@ -35,3 +35,6 @@
    The response should come from `koboldcpp/gemma-3-270m-Q8_0`.
 
 Note: the official `google/gemma-3-270m` repo is gated, so the open `ggml-org/gemma-3-270m-GGUF` quantization was used.
+
+Make sure to perform end-to-end tests by downloading deno, koboldcpp, and running chukei.
+
