@@ -1,1 +1,67 @@
+# OCaml build artifacts
+*.install
+*.cmi
+*.cmo
+*.cma
+*.cmx
+*.cmxa
+*.cmxs
+*.o
+*.a
+*.so
+*.native
+*.byte
+
+# Dune build directory
+_build/
+.dune/
+
+# OPAM
+.opam/
+*.opam.lock
+
+# Editor backup files
+*~
+*.orig
+*.bak
+*.save
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Binary executables
+bin/main
+bin/model_resolver
+bin/repl
+
+# WASM compilation artifacts
+*.wasm
+*.js
+*.wasm.js
+*.wasm.d.ts
+wasm/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Coverage reports
+.coverage/
+*.coverage
+
+# Documentation
+_html/
+odoc.support/
+
+# Project-specific
 chukei
