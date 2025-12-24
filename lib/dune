@@ -1,0 +1,11 @@
+(library
+ (name model_resolver)
+ (public_name chukei.model_resolver)
+ (libraries base)
+ (modules model_resolver))
+
+(library
+ (name fs_store)
+ (public_name chukei.fs_store)
+ (libraries model_resolver)
+ (modules fs_store))

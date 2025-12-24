@@ -1,0 +1,10 @@
+(executable
+ (public_name chukei)
+ (name main)
+ (libraries model_resolver fs_store dream yojson lwt)
+ (preprocess (pps lwt_ppx)))
+
+(executable
+ (public_name chukei-repl)
+ (name repl)
+ (libraries model_resolver fs_store linenoise))
