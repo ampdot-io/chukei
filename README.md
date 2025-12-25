@@ -53,10 +53,35 @@ is undocumented and expected to change.
 deno run -A main.ts
 ```
 
-or
+## Development
 
+### OCaml
+
+Prerequisites:
+- [opam](https://opam.ocaml.org/doc/Install.html)
+
+```bash
+# Install dependencies and build
+opam install . --deps-only
+dune build
+
+# Install dev tools (LSP, formatter)
+dune tools exec ocamllsp -- --version
+dune tools exec ocamlformat -- --version
+opam install ocamlformat  # needed for editor integration
+
+# Run the REPL
+dune exec chukei-repl
 ```
+
+For editor support, ensure your editor uses the opam environment. You can use [direnv](https://direnv.net/) with the included `.envrc`, or manually run `eval $(opam env)` before launching your editor.
+
+### Deno (TypeScript)
+
+To compile a standalone binary:
+
+```bash
 deno compile -A --output chukei main.ts
 ```
 
-and then copy the resulting binary to the target system
+Then copy the resulting binary to the target system.
