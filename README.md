@@ -5,11 +5,12 @@
 [conduit 1.x](https://github.com/ampdot-io/conduit)
 is a language model (LLM) reverse proxy that acted as a compatibility
 layer between LLM API consumers and LLM providers based on the user's
-available hardware, API keys, and other resources.
+configuration.
 
 chukei is also a language model reverse proxy service. However, when the
 user requests a language model that it lacks a configuration for, instead of
-returning 404 Not Found, it **agentically auto-configures itself**.
+returning 404 Not Found, it **agentically auto-configures itself** based on
+available hardware, API keys, and other resources.
 
 ![zealous autoconfig, but for LLMs](https://imgs.xkcd.com/comics/zealous_autoconfig.png)
 
