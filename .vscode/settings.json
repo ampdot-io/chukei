@@ -1,3 +1,7 @@
 {
-    "deno.enable": true
+    "deno.enable": true,
+    "ocaml.sandbox": {
+        "kind": "opam",
+        "switch": "default"
+    }
 }
