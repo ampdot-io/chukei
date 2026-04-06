@@ -17,11 +17,13 @@ import * as hfHub from "https://esm.sh/@huggingface/hub";
 
 const router = new Router();
 
-// Track running koboldcpp processes so we can manage memory
+// Track running inference processes (koboldcpp or mlx) so we can manage memory
 const runningModels = new Map<
     string,
-    { proc: Deno.ChildProcess; lastUsed: number; memory: number; port: number }
+    { proc: Deno.ChildProcess; lastUsed: number; memory: number; port: number; backend: "koboldcpp" | "mlx" | "llama_server" }
 >();
+
+const UVX_PATH = os.homedir() + "/.local/bin/uvx";
 
 async function ensureModelsPath() {
     await Deno.mkdir(os.homedir() + "/models", { recursive: true });
@@ -35,8 +37,21 @@ async function ensureModelsDir() {
     await Deno.mkdir(getConfigPath(), { recursive: true });
 }
 
-async function waitForPort(port: number) {
-    for (let i = 0; i < 60; i++) {
+async function findFreePort(start: number): Promise<number> {
+    for (let port = start; port < start + 100; port++) {
+        try {
+            const listener = Deno.listen({ hostname: "127.0.0.1", port });
+            listener.close();
+            return port;
+        } catch {
+            // port in use, try next
+        }
+    }
+    throw new Error(`No free port found in range ${start}-${start + 99}`);
+}
+
+async function waitForPort(port: number, timeoutSecs = 30) {
+    for (let i = 0; i < timeoutSecs * 2; i++) {
         try {
             const conn = await Deno.connect({ hostname: "127.0.0.1", port });
             conn.close();
@@ -80,6 +95,9 @@ const configSchema = z.looseObject({
     body: z.looseObject({}).default({}),
     kobold_path: z.string().optional(),
     model_path: z.string().optional(),
+    mlx_model_path: z.string().optional(),
+    llama_server_path: z.string().optional(),
+    llama_server_extra_args: z.array(z.string()).optional(),
 });
 
 const baseProviderSchema = configSchema.omit({ provider: true }).required({
@@ -98,6 +116,11 @@ const KoboldProvider = baseProviderSchema.extend({
     }),
 });
 
+const MlxProvider = baseProviderSchema.extend({
+    discovery_type: z.literal("mlx"),
+    model_search_paths: z.array(z.string()).default([]),
+});
+
 const OpenAIProvider = baseProviderSchema.extend({
     discovery_type: z.literal("openai_models_list").optional().default(
         "openai_models_list",
@@ -106,6 +129,7 @@ const OpenAIProvider = baseProviderSchema.extend({
 
 const Provider = z.discriminatedUnion("discovery_type", [
     KoboldProvider,
+    MlxProvider,
     OpenAIProvider,
 ]);
 
@@ -352,6 +376,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         lastUsed: Date.now(),
                         memory: requiredMem,
                         port,
+                        backend: "koboldcpp",
                     });
                     await waitForPort(port);
                     config = {
@@ -361,6 +386,71 @@ async function handleRequest(ctx: Context, next: Next) {
                         kobold_path: koboldProvider.kobold_path,
                         model_path: localModelPath,
                     };
+                } else if (provider.discovery_type === "mlx") {
+                    const mlxProvider = provider as unknown as z.infer<
+                        typeof MlxProvider
+                    >;
+                    // Search local model_search_paths for a directory matching the model name
+                    const modelBaseName = req.model.split("/").pop() ?? req.model;
+                    for (const searchPath of mlxProvider.model_search_paths) {
+                        // Try exact match, then case-insensitive, then partial
+                        const candidates = [
+                            `${searchPath}/${modelBaseName}`,
+                            `${searchPath}/${req.model}`,
+                        ];
+                        for (const candidate of candidates) {
+                            try {
+                                const stat = await Deno.stat(candidate);
+                                if (stat.isDirectory) {
+                                    // Check for config.json (present in all MLX/HF model dirs)
+                                    // Avoids readDir which can fail on external volumes due to macOS permissions
+                                    const hasConfig = await fileExists(`${candidate}/config.json`);
+                                    if (hasConfig) {
+                                        console.log(`Found MLX model at ${candidate}`);
+                                        const mlxPort = await findFreePort(56000);
+                                        console.log(`Starting MLX server on port ${mlxPort}`);
+                                        const mlxCmd = new Deno.Command(UVX_PATH, {
+                                            args: [
+                                                "--python", "3.13",
+                                                "--from", "mlx-lm",
+                                                "mlx_lm.server",
+                                                "--model", candidate,
+                                                "--port", String(mlxPort),
+                                                "--host", "127.0.0.1",
+                                            ],
+                                            stderr: "piped",
+                                        });
+                                        const mlxProc = mlxCmd.spawn();
+                                        const mlxStderrPath = `${getConfigPath()}/mlx.${mlxProc.pid}.stderr`;
+                                        const mlxStderrFile = await Deno.open(mlxStderrPath, {
+                                            create: true, write: true, truncate: true,
+                                        });
+                                        mlxProc.stderr?.pipeTo(mlxStderrFile.writable).catch((err) =>
+                                            console.error("Failed to pipe mlx stderr", err)
+                                        );
+                                        runningModels.set(req.model, {
+                                            proc: mlxProc,
+                                            lastUsed: Date.now(),
+                                            memory: 0,
+                                            port: mlxPort,
+                                            backend: "mlx",
+                                        });
+                                        await waitForPort(mlxPort, 300);
+                                        config = {
+                                            api_base: `http://127.0.0.1:${mlxPort}`,
+                                            mlx_model_path: candidate,
+                                            headers: {},
+                                            body: {},
+                                        };
+                                        break;
+                                    }
+                                }
+                            } catch {
+                                // Directory doesn't exist, try next
+                            }
+                        }
+                        if (config != null) break;
+                    }
                 }
                 if (config != null) {
                     break;
@@ -431,8 +521,107 @@ async function handleRequest(ctx: Context, next: Next) {
                 lastUsed: Date.now(),
                 memory: requiredMem,
                 port,
+                backend: "koboldcpp",
             });
             await waitForPort(port);
+            config.api_base = `http://127.0.0.1:${port}`;
+            await Deno.writeTextFile(modelFileName, toml.stringify(config));
+        } else if (
+            !runningModels.has(req.model) &&
+            config.mlx_model_path
+        ) {
+            const port = 55000 + runningModels.size;
+            // Use 56000+ range for MLX to avoid collisions with koboldcpp on 55000+
+            const mlxPort = 56000 + runningModels.size;
+            console.log(`Starting MLX server for ${config.mlx_model_path} on port ${mlxPort}`);
+            const command = new Deno.Command(UVX_PATH, {
+                args: [
+                    "--python", "3.13",
+                    "--from", "mlx-lm",
+                    "mlx_lm.server",
+                    "--model", config.mlx_model_path,
+                    "--port", String(mlxPort),
+                    "--host", "127.0.0.1",
+                ],
+                stderr: "piped",
+            });
+            const proc = command.spawn();
+            const stderrPath =
+                `${getConfigPath()}/mlx.${proc.pid}.stderr`;
+            const stderrFile = await Deno.open(stderrPath, {
+                create: true,
+                write: true,
+                truncate: true,
+            });
+            proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
+                console.error("Failed to pipe mlx stderr", err)
+            );
+            // Estimate memory from first safetensors file size * expected count
+            // Avoids readDir which can fail on external volumes due to macOS permissions
+            const dirSize = 0;
+            runningModels.set(req.model, {
+                proc,
+                lastUsed: Date.now(),
+                memory: dirSize,
+                port: mlxPort,
+                backend: "mlx",
+            });
+            await waitForPort(mlxPort, 300);
+            config.api_base = `http://127.0.0.1:${mlxPort}`;
+            await Deno.writeTextFile(modelFileName, toml.stringify(config));
+        } else if (
+            !runningModels.has(req.model) &&
+            config.llama_server_path &&
+            config.model_path
+        ) {
+            const stat = await Deno.stat(config.model_path).catch(() => null);
+            const requiredMem = stat?.size ?? 0;
+            let available = Deno.systemMemoryInfo().available;
+            if (requiredMem > available) {
+                const entries = [...runningModels.entries()].sort((a, b) =>
+                    a[1].lastUsed - b[1].lastUsed
+                );
+                for (const [modelName, info] of entries) {
+                    console.log("Killing LRU process", modelName);
+                    info.proc.kill("SIGKILL");
+                    runningModels.delete(modelName);
+                    available = Deno.systemMemoryInfo().available;
+                    if (requiredMem <= available) break;
+                }
+            }
+            const port = await findFreePort(57000);
+            const extraArgs = config.llama_server_extra_args ?? [];
+            console.log(`Starting llama-server for ${config.model_path} on port ${port}`);
+            const command = new Deno.Command(config.llama_server_path, {
+                args: [
+                    "-m", config.model_path,
+                    "--port", String(port),
+                    "--host", "127.0.0.1",
+                    "-ngl", "-1",
+                    "-fa", "on",
+                    ...extraArgs,
+                ],
+                stderr: "piped",
+            });
+            const proc = command.spawn();
+            const stderrPath =
+                `${getConfigPath()}/llama-server.${proc.pid}.stderr`;
+            const stderrFile = await Deno.open(stderrPath, {
+                create: true,
+                write: true,
+                truncate: true,
+            });
+            proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
+                console.error("Failed to pipe llama-server stderr", err)
+            );
+            runningModels.set(req.model, {
+                proc,
+                lastUsed: Date.now(),
+                memory: requiredMem,
+                port,
+                backend: "llama_server",
+            });
+            await waitForPort(port, 300);
             config.api_base = `http://127.0.0.1:${port}`;
             await Deno.writeTextFile(modelFileName, toml.stringify(config));
         }
@@ -456,6 +645,7 @@ async function handleRequest(ctx: Context, next: Next) {
                     code: 500,
                 },
             };
+            return;
         }
     }
     if (config.provider != null) {
@@ -465,6 +655,11 @@ async function handleRequest(ctx: Context, next: Next) {
         }
     }
     const modifiedBody = merge(originalBody, config.body);
+    // MLX server doesn't accept a model field — it serves whichever model was loaded
+    const running = runningModels.get(modifiedBody?.model);
+    if (running?.backend === "mlx") {
+        delete modifiedBody.model;
+    }
     await proxy(config.api_base, {
         headers: computeHeaders(config),
         proxyHeaders: false,
