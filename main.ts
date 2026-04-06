@@ -9,7 +9,7 @@ import * as z from "npm:zod";
 import os from "node:os";
 import * as toml from "https://deno.land/std@0.224.0/toml/mod.ts";
 import { walk } from "https://deno.land/std@0.224.0/fs/walk.ts";
-import { getQuantizationType, QuantInfo, securePath } from "./util.ts";
+import { downloadFile, getQuantizationType, QuantInfo, securePath } from "./util.ts";
 import merge from "npm:merge-deep";
 import { exists as fileExists } from "https://deno.land/std@0.224.0/fs/exists.ts";
 import { dirname } from "node:path";
@@ -320,16 +320,7 @@ async function handleRequest(ctx: Context, next: Next) {
                         const downloadUrl =
                             `https://huggingface.co/${selectedQuantization.model.id}/resolve/main/${selectedQuantization.path}`;
                         console.log("Downloading model", downloadUrl);
-                        const res = await fetch(downloadUrl);
-                        if (!res.ok || !res.body) {
-                            throw new Error("Failed to download model");
-                        }
-                        const file = await Deno.open(localModelPath, {
-                            create: true,
-                            write: true,
-                            truncate: true,
-                        });
-                        await res.body.pipeTo(file.writable);
+                        await downloadFile(downloadUrl, localModelPath);
                     }
 
                     const port = 55000 + runningModels.size;
