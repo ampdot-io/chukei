@@ -63,6 +63,80 @@ async function waitForPort(port: number, timeoutSecs = 30) {
     throw new Error(`Timeout waiting for port ${port}`);
 }
 
+const UPDATE_KOBOLDCPP_SCRIPT = dirname(new URL(import.meta.url).pathname) + "/update-koboldcpp.sh";
+
+async function updateKoboldcpp(): Promise<boolean> {
+    console.log("Attempting to update koboldcpp...");
+    try {
+        const cmd = new Deno.Command("/bin/bash", { args: [UPDATE_KOBOLDCPP_SCRIPT], stderr: "piped", stdout: "piped" });
+        const output = await cmd.output();
+        const stdout = new TextDecoder().decode(output.stdout);
+        const stderr = new TextDecoder().decode(output.stderr);
+        if (output.success) {
+            console.log("koboldcpp updated:", stdout.trim());
+            return true;
+        }
+        console.error("koboldcpp update failed:", stderr);
+        return false;
+    } catch (err) {
+        console.error("koboldcpp update script error:", err);
+        return false;
+    }
+}
+
+async function launchKoboldcpp(
+    koboldPath: string,
+    modelPath: string,
+    port: number,
+): Promise<{ proc: Deno.ChildProcess; stderrPath: string }> {
+    const command = new Deno.Command(koboldPath, {
+        args: [
+            "--multiuser",
+            "--skiplauncher",
+            "--port",
+            String(port),
+            "--model",
+            modelPath,
+        ],
+        stderr: "piped",
+    });
+    const proc = command.spawn();
+    const stderrPath = `${getConfigPath()}/koboldcpp.${proc.pid}.stderr`;
+    const stderrFile = await Deno.open(stderrPath, {
+        create: true,
+        write: true,
+        truncate: true,
+    });
+    proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
+        console.error("Failed to pipe koboldcpp stderr", err)
+    );
+    return { proc, stderrPath };
+}
+
+async function launchKoboldcppWithRetry(
+    koboldPath: string,
+    modelPath: string,
+    port: number,
+): Promise<Deno.ChildProcess> {
+    const { proc, stderrPath } = await launchKoboldcpp(koboldPath, modelPath, port);
+    try {
+        await waitForPort(port);
+        return proc;
+    } catch {
+        console.log("koboldcpp failed to start, checking for updates...");
+        try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+        const stderr = await Deno.readTextFile(stderrPath).catch(() => "");
+        console.log("koboldcpp stderr:", stderr.slice(-500));
+        if (await updateKoboldcpp()) {
+            console.log("Retrying koboldcpp launch after update...");
+            const retry = await launchKoboldcpp(koboldPath, modelPath, port);
+            await waitForPort(port);
+            return retry.proc;
+        }
+        throw new Error("koboldcpp failed to start and update did not help");
+    }
+}
+
 const specialFiles = new Set(["config.toml"]);
 
 router.get("/v1/models", async (ctx) => {
@@ -357,20 +431,11 @@ async function handleRequest(ctx: Context, next: Next) {
                     }
 
                     const port = 55000 + runningModels.size;
-                    const command = new Deno.Command(
+                    const proc = await launchKoboldcppWithRetry(
                         koboldProvider.kobold_path,
-                        {
-                            args: [
-                                "--multiuser",
-                                "--skiplauncher",
-                                "--port",
-                                String(port),
-                                "--model",
-                                localModelPath,
-                            ],
-                        },
+                        localModelPath,
+                        port,
                     );
-                    const proc = command.spawn();
                     runningModels.set(req.model, {
                         proc,
                         lastUsed: Date.now(),
@@ -378,7 +443,6 @@ async function handleRequest(ctx: Context, next: Next) {
                         port,
                         backend: "koboldcpp",
                     });
-                    await waitForPort(port);
                     config = {
                         api_base: `http://127.0.0.1:${port}`,
                         headers: {},
@@ -494,27 +558,10 @@ async function handleRequest(ctx: Context, next: Next) {
                 }
             }
             const port = 55000 + runningModels.size;
-            const command = new Deno.Command(config.kobold_path, {
-                args: [
-                    "--multiuser",
-                    "--skiplauncher",
-                    "--port",
-                    String(port),
-                    "--model",
-                    config.model_path,
-                ],
-                stderr: "piped",
-            });
-            const proc = command.spawn();
-            const stderrPath =
-                `${getConfigPath()}/koboldcpp.${proc.pid}.stderr`;
-            const stderrFile = await Deno.open(stderrPath, {
-                create: true,
-                write: true,
-                truncate: true,
-            });
-            proc.stderr?.pipeTo(stderrFile.writable).catch((err) =>
-                console.error("Failed to pipe koboldcpp stderr", err)
+            const proc = await launchKoboldcppWithRetry(
+                config.kobold_path,
+                config.model_path,
+                port,
             );
             runningModels.set(req.model, {
                 proc,
@@ -523,7 +570,6 @@ async function handleRequest(ctx: Context, next: Next) {
                 port,
                 backend: "koboldcpp",
             });
-            await waitForPort(port);
             config.api_base = `http://127.0.0.1:${port}`;
             await Deno.writeTextFile(modelFileName, toml.stringify(config));
         } else if (
