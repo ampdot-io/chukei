@@ -36,5 +36,19 @@
 
 Note: the official `google/gemma-3-270m` repo is gated, so the open `ggml-org/gemma-3-270m-GGUF` quantization was used.
 
+## End-to-end testing
+
 Make sure to perform end-to-end tests by downloading deno, koboldcpp, and running chukei.
 
+## Updating koboldcpp on macOS
+
+koboldcpp crashes with a trace trap if `--skiplauncher` and `--model` are not
+provided. `--version` and `--help` will segfault. Always test with an actual
+model file, e.g.:
+```bash
+~/koboldcpp --skiplauncher --model ~/models/qwen3-0.6b.q8_0.gguf --port 55099
+```
+
+The update script at `update-koboldcpp.sh` (in this repo) downloads the latest
+release from GitHub and replaces the binary. chukei runs it automatically when
+a koboldcpp instance fails to boot.
