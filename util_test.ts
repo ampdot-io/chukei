@@ -7,7 +7,7 @@ import { securePath } from "./util.ts";
 Deno.test("securePath prevents directory traversal", () => {
     const base = "/tmp/base";
     const result = securePath(base, "../etc/passwd");
-    assert(result?.startsWith(`${base}/`));
+    assertEquals(result, null);
 });
 
 Deno.test("securePath joins paths within base", () => {
